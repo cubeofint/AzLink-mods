@@ -1,0 +1,43 @@
+allprojects {
+    group = 'com.azuriom'
+    version = '1.3.11'
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    tasks.withType(JavaCompile) {
+        options.encoding = 'UTF-8'
+        // JDK 21+ warns that -source/-target 8 are obsolete; still required for forge-1.7.10 / common.
+        options.compilerArgs << '-Xlint:-options'
+    }
+
+    repositories {
+        // Fix for Forge: "Could not find lwjgl-freetype-3.3.3-natives-macos-patch.jar"
+        maven {
+            url = 'https://libraries.minecraft.net'
+            content {
+                includeModule('org.lwjgl', 'lwjgl-freetype')
+            }
+        }
+        mavenCentral()
+    }
+}
+
+// Forge 1.7.10 is an isolated included build (RetroFuturaGradle must not share FG6 repos).
+tasks.register('buildForge1710') {
+    group = 'build'
+    description = 'Build AzLink for Forge 1.7.10 (isolated RFG included build)'
+    dependsOn gradle.includedBuild('forge-1.7.10').task(':build')
+}
+
+tasks.register('buildAllPlatforms') {
+    group = 'build'
+    description = 'Build Forge 1.20.1, NeoForge 1.21.1, and Forge 1.7.10'
+    dependsOn ':azlink-forge:build', ':azlink-neoforge:build', 'buildForge1710'
+}

@@ -1,0 +1,68 @@
+plugins {
+    // 6.0.47+ required for Gradle 8.14 (Artifactural isContinueOnConnectionFailure)
+    id 'net.minecraftforge.gradle' version '6.0.47'
+    id 'com.gradleup.shadow' version '8.3.6'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+ext {
+    minecraft_version = '1.20.1'
+    forge_version = '47.3.0'
+    // Must match Minecraft/Forge Netty; codec-http is not shipped by the game (AzLink#29).
+    netty_version = '4.1.82.Final'
+}
+
+configurations {
+    shade
+    implementation.extendsFrom shade
+}
+
+dependencies {
+    def forgeVersion = "${project.ext.minecraft_version}-${project.ext.forge_version}"
+
+    // Shade only our deps — shadow must not resolve minecraft/forge (breaks ForgeGradle repos).
+    shade project(':azlink-common')
+    // Instant commands HTTP pipeline needs HttpRequestDecoder / HttpResponseEncoder.
+    shade("io.netty:netty-codec-http:${project.ext.netty_version}") {
+        transitive = false
+    }
+    minecraft "net.minecraftforge:forge:${forgeVersion}"
+}
+
+minecraft {
+    mappings channel: 'official', version: project.ext.minecraft_version
+}
+
+processResources {
+    filesMatching('**/*.toml') {
+        expand 'version': version
+    }
+}
+
+reobf {
+    shadowJar {}
+}
+
+jar {
+    enabled = false
+}
+
+afterEvaluate {
+    tasks.matching { it.name == 'reobfJar' }.configureEach {
+        enabled = false
+    }
+}
+
+shadowJar {
+    archiveFileName = "AzLink-Forge-${project.version}-${project.ext.minecraft_version}.jar"
+    configurations = [project.configurations.shade]
+    finalizedBy 'reobfShadowJar'
+}
+
+build {
+    dependsOn shadowJar
+}

@@ -1,0 +1,90 @@
+plugins {
+    // 1.4.x: Gradle 8 + Java 21 host; RFG 2.x requires Java 25
+    id 'com.gtnewhorizons.retrofuturagradle' version '1.4.9'
+}
+
+allprojects {
+    group = 'com.azuriom'
+    version = '1.3.11'
+}
+
+subprojects {
+    apply plugin: 'java'
+
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs << '-Xlint:-options'
+    }
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(8)
+    }
+}
+
+ext {
+    minecraft_version = '1.7.10'
+    // Netty shipped with MC 1.7.10
+    netty_version = '4.0.10.Final'
+    gson_version = '2.10.1'
+}
+
+minecraft {
+    mcVersion = project.ext.minecraft_version
+    username = 'Developer'
+    injectedTags.put('VERSION', project.version)
+    injectedTags.put('MOD_ID', 'azlink')
+}
+
+configurations {
+    embed
+}
+
+dependencies {
+    // Compile against common; embed classes into the final JAR (avoid RFG attribute clash).
+    implementation project(':azlink-common')
+    embed("com.google.code.gson:gson:${project.ext.gson_version}") {
+        transitive = false
+    }
+    embed("io.netty:netty-codec-http:${project.ext.netty_version}") {
+        transitive = false
+    }
+}
+
+tasks.named('injectTags').configure {
+    outputClassName.set('com.azuriom.azlink.forge.legacy.Tags')
+}
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('**/mcmod.info') {
+        expand 'version': project.version
+    }
+}
+
+jar {
+    archiveFileName = "AzLink-Forge-${project.version}-${project.ext.minecraft_version}-dev.jar"
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from project(':azlink-common').sourceSets.main.output
+    from {
+        configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}
+
+tasks.named('reobfJar').configure {
+    archiveFileName = "AzLink-Forge-${project.version}-${project.ext.minecraft_version}.jar"
+}
+
+build {
+    dependsOn tasks.named('reobfJar')
+}

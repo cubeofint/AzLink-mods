@@ -1,0 +1,15 @@
+[
+  {
+    "modid": "azlink",
+    "name": "AzLink",
+    "description": "Link Azuriom to your Minecraft server.",
+    "version": "${version}",
+    "mcversion": "1.7.10",
+    "url": "https://github.com/Azuriom/AzLink",
+    "authorList": ["Azuriom"],
+    "credits": "",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": []
+  }
+]

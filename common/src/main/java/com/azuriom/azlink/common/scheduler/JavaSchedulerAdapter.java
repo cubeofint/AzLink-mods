@@ -1,0 +1,79 @@
+package com.azuriom.azlink.common.scheduler;
+
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+public class JavaSchedulerAdapter implements SchedulerAdapter {
+
+    private final ScheduledExecutorService scheduler;
+    private final Executor syncExecutor;
+    private final Executor asyncExecutor;
+
+    public JavaSchedulerAdapter(Executor syncExecutor) {
+        this(createScheduler(), syncExecutor);
+    }
+
+    public JavaSchedulerAdapter(Executor syncExecutor, Executor asyncExecutor) {
+        this(createScheduler(), syncExecutor, asyncExecutor);
+    }
+
+    public JavaSchedulerAdapter(ScheduledExecutorService scheduler, Executor syncExecutor) {
+        this(scheduler, syncExecutor, scheduler);
+    }
+
+    public JavaSchedulerAdapter(ScheduledExecutorService scheduler, Executor syncExecutor, Executor asyncExecutor) {
+        this.scheduler = scheduler;
+        this.syncExecutor = syncExecutor;
+        this.asyncExecutor = asyncExecutor;
+    }
+
+    @Override
+    public Executor syncExecutor() {
+        return this.syncExecutor;
+    }
+
+    @Override
+    public Executor asyncExecutor() {
+        return this.asyncExecutor;
+    }
+
+    @Override
+    public CancellableTask scheduleAsyncLater(Runnable runnable, long delay, TimeUnit unit) {
+        return new CancellableFuture(this.scheduler.schedule(runnable, delay, unit));
+    }
+
+    @Override
+    public CancellableTask scheduleAsyncRepeating(Runnable runnable, long delay, long interval, TimeUnit unit) {
+        return new CancellableFuture(this.scheduler.scheduleAtFixedRate(runnable, delay, interval, unit));
+    }
+
+    @Override
+    public void shutdown() throws Exception {
+        this.scheduler.shutdown();
+
+        this.scheduler.awaitTermination(5, TimeUnit.SECONDS);
+    }
+
+    private static ScheduledExecutorService createScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(new ThreadFactoryBuilder()
+                .name("azlink-scheduler")
+                .daemon());
+    }
+
+    private static class CancellableFuture implements CancellableTask {
+
+        private final Future<?> future;
+
+        public CancellableFuture(Future<?> future) {
+            this.future = future;
+        }
+
+        @Override
+        public void cancel() {
+            this.future.cancel(false);
+        }
+    }
+}

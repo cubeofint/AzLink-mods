@@ -1,0 +1,84 @@
+plugins {
+    id 'net.neoforged.moddev' version '2.0.139'
+    id 'com.gradleup.shadow' version '9.2.2'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+ext {
+    minecraft_version = '1.21.1'
+    neo_version = '21.1.222'
+    // Must match Minecraft/NeoForge Netty; codec-http is not shipped by the game (AzLink#29).
+    netty_version = '4.1.97.Final'
+}
+
+neoForge {
+    version = project.ext.neo_version
+    validateAccessTransformers = true
+
+    runs {
+        server {
+            server()
+        }
+    }
+
+    mods {
+        azlink {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+configurations {
+    shade
+    implementation.extendsFrom shade
+}
+
+repositories {
+    maven {
+        url = 'https://maven.ftb.dev/releases'
+    }
+}
+
+dependencies {
+    shade project(':azlink-common')
+    // Instant commands HTTP pipeline needs HttpRequestDecoder / HttpResponseEncoder.
+    shade("io.netty:netty-codec-http:${project.ext.netty_version}") {
+        transitive = false
+    }
+
+    // Optional at runtime: FTB Essentials kit CRUD hooks (compileOnly).
+    compileOnly("dev.ftb.mods:ftb-essentials-neoforge:2101.1.10") {
+        transitive = false
+    }
+    compileOnly("dev.ftb.mods:ftb-library-neoforge:2101.1.35") {
+        transitive = false
+    }
+}
+
+processResources {
+    filesMatching('**/*.toml') {
+        expand 'version': version
+    }
+}
+
+jar {
+    enabled = false
+}
+
+shadowJar {
+    archiveFileName = "AzLink-NeoForge-${project.version}-${project.ext.minecraft_version}.jar"
+    configurations = [project.configurations.shade]
+
+    dependencies {
+        include dependency('com.azuriom:.*')
+        include dependency('io.netty:netty-codec-http')
+    }
+}
+
+build {
+    dependsOn shadowJar
+}

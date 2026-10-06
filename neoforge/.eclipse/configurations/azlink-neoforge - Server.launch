@@ -1,0 +1,10 @@
+<?xml version="1.0" ?>
+<launchConfiguration type="org.eclipse.jdt.launching.localJavaApplication">
+    <stringAttribute key="org.eclipse.jdt.launching.PROJECT_ATTR" value="azlink-neoforge"></stringAttribute>
+    <stringAttribute key="org.eclipse.jdt.launching.MAIN_TYPE" value="net.neoforged.devlaunch.Main"></stringAttribute>
+    <stringAttribute key="org.eclipse.jdt.launching.PROGRAM_ARGUMENTS" value=" &quot;@E:\\Lumen\\mods src for mixins\\AzLink-mods-1.21.1\\neoforge\\build\\moddev\\serverRunProgramArgs.txt&quot;"></stringAttribute>
+    <stringAttribute key="org.eclipse.jdt.launching.VM_ARGUMENTS" value=" &quot;@E:\\Lumen\\mods src for mixins\\AzLink-mods-1.21.1\\neoforge\\build\\moddev\\serverRunVmArgs.txt&quot; &quot;-Dfml.modFolders=azlink%%E:\\Lumen\\mods src for mixins\\AzLink-mods-1.21.1\\neoforge\\bin\\main&quot;"></stringAttribute>
+    <stringAttribute key="org.eclipse.jdt.launching.WORKING_DIRECTORY" value="E:\Lumen\mods src for mixins\AzLink-mods-1.21.1\neoforge\run"></stringAttribute>
+    <booleanAttribute key="org.eclipse.jdt.launching.STOP_IN_MAIN" value="false"></booleanAttribute>
+    <booleanAttribute key="org.eclipse.jdt.launching.ATTR_ATTR_USE_ARGFILE" value="false"></booleanAttribute>
+</launchConfiguration>

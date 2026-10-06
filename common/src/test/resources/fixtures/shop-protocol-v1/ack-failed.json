@@ -1,0 +1,10 @@
+{
+  "operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "claim_token": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "status": "failed",
+  "result_code": "integrity_error",
+  "applied_entitlement_version": null,
+  "executor_version": "1.3.11",
+  "message": "payload_hash mismatch for operation_id"
+}

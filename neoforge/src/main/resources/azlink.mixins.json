@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.azuriom.azlink.neoforge.mixin",
+  "plugin": "com.azuriom.azlink.neoforge.mixin.AzLinkMixinPlugin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ftbessentials.KitManagerMixin",
+    "ftbessentials.KitCommandPreferredPlayerMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
