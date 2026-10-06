@@ -1,0 +1,32 @@
+{
+  "protocol_version": 1,
+  "server_time": "2026-09-17T12:00:00+00:00",
+  "operations": [
+    {
+      "operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "claim_token": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      "type": "privilege_reconcile",
+      "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "payload": {
+        "schema_version": 1,
+        "type": "privilege_reconcile",
+        "user": { "uuid": "11111111-1111-1111-1111-111111111111" },
+        "entitlement": {
+          "id": 7,
+          "version": 3,
+          "purchase_id": 99,
+          "key": "vip",
+          "starts_at": "2026-09-01T00:00:00+00:00",
+          "expires_at": "2026-10-01T00:00:00+00:00"
+        },
+        "capabilities": { "fly": true }
+      },
+      "attempt_no": 1,
+      "lease_expires_at": "2026-09-17T12:01:00+00:00",
+      "unknown_optional_field": "ignored-safely"
+    }
+  ],
+  "has_more": false,
+  "compatibility_errors": [],
+  "extra_top_level": true
+}

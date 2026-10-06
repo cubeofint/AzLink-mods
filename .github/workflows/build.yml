@@ -1,0 +1,46 @@
+name: Java CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        java-version: [ 21 ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK ${{ matrix.java-version }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java-version }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        run: ./gradlew build
+
+      - name: Upload AzLink-Forge.jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: AzLink-Forge
+          path: forge/build/libs/AzLink-Forge-*.jar
+          overwrite: true
+
+      - name: Upload AzLink-NeoForge.jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: AzLink-NeoForge
+          path: neoforge/build/libs/AzLink-NeoForge-*.jar
+          overwrite: true

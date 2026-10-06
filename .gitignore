@@ -1,0 +1,33 @@
+# Eclipse
+.classpath
+.project
+.metadata
+.settings/
+
+# IntelliJ
+.idea/
+.idea_modules/
+*.iml
+*.iws
+/out/
+
+# Mac
+.DS_Store
+
+# VS Code / Eclipse output
+.vscode/
+/bin/
+/*/bin/
+
+# Serena
+.serena/
+
+# Gradle
+.gradle
+/build/
+/*/build/
+
+# Local run directories and test modpacks
+/run/
+/*/run/
+/modlist_neoforge/

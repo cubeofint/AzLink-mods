@@ -1,0 +1,10 @@
+{
+  "operation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "claim_token": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+  "payload_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "status": "succeeded",
+  "result_code": "applied",
+  "applied_entitlement_version": 3,
+  "executor_version": "1.3.11",
+  "message": null
+}

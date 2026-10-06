@@ -1,0 +1,11 @@
+{
+  "protocol_version": 1,
+  "executor_version": "1.3.11",
+  "supported_operation_types": [
+    "privilege_reconcile",
+    "privilege_revoke",
+    "kit_redeem"
+  ],
+  "supported_capabilities": ["fly"],
+  "max_batch": 20
+}

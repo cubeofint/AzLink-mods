@@ -1,0 +1,24 @@
+pluginManagement {
+    repositories {
+        maven {
+            name = 'GTNH Maven'
+            url = 'https://nexus.gtnewhorizons.com/repository/public/'
+            mavenContent {
+                includeGroup 'com.gtnewhorizons'
+                includeGroupByRegex 'com\\.gtnewhorizons\\..+'
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.9.0'
+}
+
+rootProject.name = 'azlink-forge-1.7.10'
+
+// Reuse shared Java 8 core without pulling ForgeGradle/NeoForge into this RFG build.
+include ':azlink-common'
+project(':azlink-common').projectDir = file('../common')
