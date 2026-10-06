@@ -57,6 +57,9 @@ dependencies {
     compileOnly("dev.ftb.mods:ftb-library-neoforge:2101.1.35") {
         transitive = false
     }
+
+    // Optional at runtime: LuckPerms privilege backend (compileOnly).
+    compileOnly 'net.luckperms:api:5.4'
 }
 
 processResources {
