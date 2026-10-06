@@ -16,15 +16,18 @@
 
 # VS Code / Eclipse output
 .vscode/
-bin/
+/bin/
+/*/bin/
 
 # Serena
 .serena/
 
 # Gradle
 .gradle
-build/
+/build/
+/*/build/
 
 # Local run directories and test modpacks
-run/
-modlist_neoforge/
+/run/
+/*/run/
+/modlist_neoforge/
