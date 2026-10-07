@@ -41,7 +41,7 @@ the site copy. No absolute overwrite in either direction. `adjust` never touches
 | --- | --- | --- |
 | Admin user edit set-balance | `CurrencyServerSync::adjust` (signed delta + reason) | `adjustServerBalance` as before |
 | Admin `transferCoins` | `ServerOperationQueue::enqueue` to_server/from_server | `withdrawToServer` / `depositFromServer` |
-| Profile `transferCoins` | **refused** (0004): validation error «используйте /pay в игре», form lists only other servers | same ledger methods |
+| Profile `transferCoins` | same enqueue | same ledger methods |
 | Shop / quark exchange | **not in this snapshot** — call `CurrencyServerSync::adjust` (`source=shop` / `quark_exchange`) when those land | — |
 | `CurrencyLedger::adjustServerBalance` itself | unchanged (used by the sync/ack path) | unchanged |
 
@@ -64,10 +64,6 @@ Existing behaviour is unchanged while the global queue flag is off.
      enqueue two reconcile ops; probe command skips users with a pending op;
    - admin server-balance table keeps its scroll/sticky header;
    - tests set flags via `Setting::updateSettings` (Azuriom reads settings from cache).
-4. `0004` — profile site↔server transfer (`profile.transfer-coins`) is refused for servers where
-   `enabledFor()` is true (players use `/pay` in game); the coints profile form lists only the other
-   servers and shows a hint. Other servers and queue-off behaviour are unchanged.
-   Adds `messages.profile.coins_transfer.disabled_*` and `ProfileCoinsTransferQueueTest`.
 
 ## Apply (after DB dump + file backup, with confirmation)
 
@@ -76,7 +72,6 @@ cd /var/www/main-site
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0001-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0002-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0003-*.patch
-git apply ../AzLink-mods/site-patches/gluon-server-adjust/0004-*.patch
 php artisan migrate --force
 php artisan currency:verify-ledger
 # enable only when ready, e.g. server 9 only:
@@ -91,12 +86,11 @@ php artisan currency:verify-ledger
 ```
 cd /var/www/main-site
 php vendor/bin/phpunit tests/Feature/CurrencyServerSyncTest.php
-php vendor/bin/phpunit tests/Feature/ProfileCoinsTransferQueueTest.php
 ```
 
-Run the files directly (`--filter` loads every test file, and an unrelated existing test has a
-fatal signature error). Verified on a copy of the production tree: 13 + 5 tests green on sqlite
-and MariaDB. The coints-theme render test skips when theme assets are not published.
+Run the file directly (`--filter` loads every test file, and an unrelated existing test has a
+fatal signature error). Verified on a copy of the production tree: 13 tests green on sqlite
+and MariaDB.
 
 ## Rollback
 
@@ -108,7 +102,7 @@ php artisan migrate:rollback --step=1
 
 (`step=1` drops `currency.server_queue_servers` and the movement `deltas`/`site_op_id`
 columns). Also delete the four files the series adds (`CurrencyServerSync.php`,
-`CurrencyServerSyncProbeCommand.php`, the migration, the two tests) after the rollback. Flags can be set back to `0` / `''` without rollback.
+`CurrencyServerSyncProbeCommand.php`, the migration, the test) after the rollback. Flags can be set back to `0` / `''` without rollback.
 
 ## JSON contract
 
