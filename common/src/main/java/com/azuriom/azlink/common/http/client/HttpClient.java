@@ -67,10 +67,21 @@ public class HttpClient {
      * Acknowledge a queued operation. {@code status} is {@code applied} or {@code failed}. Idempotent on the site.
      */
     public CompletableFuture<com.google.gson.JsonObject> ackCoinOperation(String operationId, String status, String error) {
+        return ackCoinOperation(operationId, status, error, null);
+    }
+
+    /**
+     * Acknowledge a queued operation and optionally report the in-game wallet after handling it.
+     */
+    public CompletableFuture<com.google.gson.JsonObject> ackCoinOperation(String operationId, String status, String error,
+                                                                          Long balanceAfter) {
         JsonObject params = new JsonObject();
         params.addProperty("status", status);
         if (error != null) {
             params.addProperty("error", error);
+        }
+        if (balanceAfter != null) {
+            params.addProperty("balance_after", balanceAfter);
         }
         return request(RequestMethod.POST, "/azlink/coins/operations/" + operationId + "/ack", params, com.google.gson.JsonObject.class);
     }

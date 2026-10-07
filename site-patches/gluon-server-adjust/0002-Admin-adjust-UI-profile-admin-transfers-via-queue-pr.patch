@@ -1,0 +1,681 @@
+From 997386990a9c08377c2cc6dde5140f350b1abffe Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 17:52:21 +0000
+Subject: [PATCH 2/2] Admin adjust UI, profile/admin transfers via queue, probe
+ command, tests
+
+Queue servers use a signed in-game adjust plus required reason instead of
+set-balance. Site<->server transfers go through the operation queue when
+enabledFor. Artisan currency:server-sync-probe enqueues 0-reconcile probes.
+---
+ .../CurrencyServerSyncProbeCommand.php        |  69 ++++++
+ app/Http/Controllers/Admin/UserController.php |  82 ++++++-
+ app/Http/Controllers/ProfileController.php    |  11 +-
+ resources/lang/ru/admin.php                   |  18 ++
+ resources/views/admin/users/edit.blade.php    | 119 ++++++++--
+ tests/Feature/CurrencyServerSyncTest.php      | 218 ++++++++++++++++++
+ 6 files changed, 493 insertions(+), 24 deletions(-)
+ create mode 100644 app/Console/Commands/CurrencyServerSyncProbeCommand.php
+ create mode 100644 tests/Feature/CurrencyServerSyncTest.php
+
+diff --git a/app/Console/Commands/CurrencyServerSyncProbeCommand.php b/app/Console/Commands/CurrencyServerSyncProbeCommand.php
+new file mode 100644
+index 0000000..c344504
+--- /dev/null
++++ b/app/Console/Commands/CurrencyServerSyncProbeCommand.php
+@@ -0,0 +1,69 @@
++<?php
++
++namespace Azuriom\Console\Commands;
++
++use Azuriom\Models\Server;
++use Azuriom\Models\User;
++use Azuriom\Models\UserServerBalance;
++use Azuriom\Services\Currency\CurrencyServerSync;
++use Azuriom\Services\Currency\ServerOperationQueue;
++use Illuminate\Console\Command;
++
++/**
++ * Enqueue 0-amount reconcile probes so the game reports its wallet via ack balance_after.
++ */
++class CurrencyServerSyncProbeCommand extends Command
++{
++    protected $signature = 'currency:server-sync-probe {server : server id} {user? : user id or name}';
++
++    protected $description = 'Enqueue 0-amount reconcile probes for one user or all users with a balance on the server';
++
++    public function handle(CurrencyServerSync $sync): int
++    {
++        $serverId = (int) $this->argument('server');
++        $server = Server::query()->find($serverId);
++
++        if ($server === null) {
++            $this->error('Server not found');
++
++            return self::FAILURE;
++        }
++
++        if (! ServerOperationQueue::enabledFor($server)) {
++            $this->error('Queue is not enabled for this server (currency.server_queue_enabled / currency.server_queue_servers / type mc-azlink)');
++
++            return self::FAILURE;
++        }
++
++        $userArg = $this->argument('user');
++
++        if ($userArg !== null) {
++            $user = ctype_digit((string) $userArg)
++                ? User::query()->find((int) $userArg)
++                : User::query()->where('name', $userArg)->first();
++
++            if ($user === null) {
++                $this->error('User not found');
++
++                return self::FAILURE;
++            }
++
++            $users = collect([$user]);
++        } else {
++            $ids = UserServerBalance::query()->where('server_id', $serverId)->pluck('user_id');
++            $users = User::query()->whereIn('id', $ids)->get();
++        }
++
++        $count = 0;
++
++        foreach ($users as $user) {
++            $op = $sync->adjust($user, $server, 0, 'reconcile', ['source' => 'reconcile']);
++            $this->line("probe {$op->id} user {$user->id} {$user->name}");
++            $count++;
++        }
++
++        $this->info("Queued {$count} probe(s)");
++
++        return self::SUCCESS;
++    }
++}
+diff --git a/app/Http/Controllers/Admin/UserController.php b/app/Http/Controllers/Admin/UserController.php
+index 006a953..b4b7481 100755
+--- a/app/Http/Controllers/Admin/UserController.php
++++ b/app/Http/Controllers/Admin/UserController.php
+@@ -5,6 +5,7 @@ namespace Azuriom\Http\Controllers\Admin;
+ use Azuriom\Http\Controllers\Controller;
+ use Azuriom\Http\Requests\UserRequest;
+ use Azuriom\Models\ActionLog;
++use Azuriom\Models\CurrencyServerOperation;
+ use Azuriom\Models\CurrencyTransaction;
+ use Azuriom\Models\Notification;
+ use Azuriom\Models\Permission;
+@@ -14,6 +15,8 @@ use Azuriom\Models\User;
+ use Azuriom\Models\UserServerBalance;
+ use Azuriom\Notifications\AlertNotification;
+ use Azuriom\Services\Currency\CurrencyLedger;
++use Azuriom\Services\Currency\CurrencyServerSync;
++use Azuriom\Services\Currency\ServerOperationQueue;
+ use Azuriom\Support\Discord\LinkedRoles;
+ use Illuminate\Auth\Events\PasswordReset;
+ use Illuminate\Http\Request;
+@@ -124,6 +127,18 @@ class UserController extends Controller
+ 
+         $balancesByServerId = $user->serverBalances->keyBy('server_id');
+ 
++        $queueEnabledByServerId = $servers->mapWithKeys(
++            fn (Server $server) => [$server->id => ServerOperationQueue::enabledFor($server)]
++        );
++
++        $recentOpsByServerId = CurrencyServerOperation::query()
++            ->where('user_id', $user->id)
++            ->orderByDesc('created_at')
++            ->limit(200)
++            ->get()
++            ->groupBy('server_id')
++            ->map(fn ($ops) => $ops->take(10));
++
+         return view('admin.users.edit', [
+             'user' => $user,
+             'roles' => Role::orderByDesc('power')->get(),
+@@ -131,6 +146,8 @@ class UserController extends Controller
+             'notificationLevels' => Notification::LEVELS,
+             'servers' => $servers,
+             'balancesByServerId' => $balancesByServerId,
++            'queueEnabledByServerId' => $queueEnabledByServerId,
++            'recentOpsByServerId' => $recentOpsByServerId,
+             'permissions' => Permission::permissionsWithName(),
+         ]);
+     }
+@@ -149,6 +166,10 @@ class UserController extends Controller
+         $this->validate($request, [
+             'server_balances' => ['nullable', 'array'],
+             'server_balances.*' => ['nullable', 'numeric', 'min:0', 'max:999999999999'],
++            'server_adjusts' => ['nullable', 'array'],
++            'server_adjusts.*' => ['nullable', 'integer', 'min:-999999999', 'max:999999999'],
++            'server_adjust_reasons' => ['nullable', 'array'],
++            'server_adjust_reasons.*' => ['nullable', 'string', 'max:190'],
+         ]);
+ 
+         $validated = $request->validated();
+@@ -237,7 +258,15 @@ class UserController extends Controller
+         $ledger = app(CurrencyLedger::class);
+ 
+         try {
+-            if ($data['direction'] === 'to_site') {
++            if (ServerOperationQueue::enabledFor($serverId)) {
++                $direction = $data['direction'] === 'to_site'
++                    ? CurrencyServerOperation::FROM_SERVER
++                    : CurrencyServerOperation::TO_SERVER;
++                app(ServerOperationQueue::class)->enqueue($user, $serverId, $direction, (int) $amount, [
++                    'source' => 'admin_user_edit',
++                    'admin_id' => $request->user()->id,
++                ]);
++            } elseif ($data['direction'] === 'to_site') {
+                 $ledger->depositFromServer($user, $serverId, $amount);
+             } else {
+                 $ledger->withdrawToServer($user, $serverId, $amount);
+@@ -377,9 +406,8 @@ class UserController extends Controller
+      */
+     protected function syncServerBalances(Request $request, User $user, CurrencyLedger $ledger, array $serverBalancesInput): void
+     {
+-        if ($serverBalancesInput === []) {
+-            return;
+-        }
++        $adjusts = $request->input('server_adjusts', []);
++        $reasons = $request->input('server_adjust_reasons', []);
+ 
+         $allowedServerIds = Server::query()->pluck('id')
+             ->merge(
+@@ -390,6 +418,48 @@ class UserController extends Controller
+             ->unique()
+             ->flip();
+ 
++        $sync = app(CurrencyServerSync::class);
++
++        foreach ($adjusts as $serverId => $amount) {
++            $serverId = (int) $serverId;
++
++            if (! $allowedServerIds->has($serverId) || ! ServerOperationQueue::enabledFor($serverId)) {
++                continue;
++            }
++
++            if ($amount === null || $amount === '' || (int) $amount === 0) {
++                continue;
++            }
++
++            $delta = (int) $amount;
++            $reason = trim((string) ($reasons[$serverId] ?? ''));
++
++            if ($reason === '') {
++                throw ValidationException::withMessages([
++                    'server_adjust_reasons.'.$serverId => trans('admin.users.server_balances.reason_required'),
++                ]);
++            }
++
++            try {
++                $sync->adjust($user, $serverId, $delta, $reason, [
++                    'source' => 'admin_user_edit',
++                    'admin_id' => $request->user()->id,
++                ]);
++            } catch (RuntimeException $e) {
++                if ($e->getMessage() === 'insufficient_server_coins') {
++                    throw ValidationException::withMessages([
++                        'server_adjusts.'.$serverId => trans('admin.users.server_balances.insufficient'),
++                    ]);
++                }
++
++                throw $e;
++            }
++        }
++
++        if ($serverBalancesInput === []) {
++            return;
++        }
++
+         foreach ($serverBalancesInput as $serverId => $amount) {
+             $serverId = (int) $serverId;
+ 
+@@ -397,6 +467,10 @@ class UserController extends Controller
+                 continue;
+             }
+ 
++            if (ServerOperationQueue::enabledFor($serverId)) {
++                continue;
++            }
++
+             $newBalance = round((float) $amount, 2);
+             $current = $ledger->serverBalance($user, $serverId);
+             $delta = round($newBalance - $current, 2);
+diff --git a/app/Http/Controllers/ProfileController.php b/app/Http/Controllers/ProfileController.php
+index 9f8fb80..45e5dc1 100755
+--- a/app/Http/Controllers/ProfileController.php
++++ b/app/Http/Controllers/ProfileController.php
+@@ -3,6 +3,7 @@
+ namespace Azuriom\Http\Controllers;
+ 
+ use Azuriom\Models\ActionLog;
++use Azuriom\Models\CurrencyServerOperation;
+ use Azuriom\Models\CurrencyTransaction;
+ use Azuriom\Models\Server;
+ use Azuriom\Models\ServerPlayerStat;
+@@ -13,6 +14,7 @@ use Azuriom\Notifications\UserDelete;
+ use Azuriom\Rules\TrustedEmailDomain;
+ use Azuriom\Rules\Username;
+ use Azuriom\Services\Currency\CurrencyLedger;
++use Azuriom\Services\Currency\ServerOperationQueue;
+ use Azuriom\Support\Discord\LinkedRoles;
+ use Azuriom\Support\QrCodeRenderer;
+ use Azuriom\Support\Telegram\TelegramLoginVerifier;
+@@ -577,7 +579,14 @@ class ProfileController extends Controller
+         $ledger = app(CurrencyLedger::class);
+ 
+         try {
+-            if ($data['direction'] === 'to_site') {
++            if (ServerOperationQueue::enabledFor($serverId)) {
++                $direction = $data['direction'] === 'to_site'
++                    ? CurrencyServerOperation::FROM_SERVER
++                    : CurrencyServerOperation::TO_SERVER;
++                app(ServerOperationQueue::class)->enqueue($user, $serverId, $direction, (int) $amount, [
++                    'source' => 'profile',
++                ]);
++            } elseif ($data['direction'] === 'to_site') {
+                 $ledger->depositFromServer($user, $serverId, $amount);
+             } else {
+                 $ledger->withdrawToServer($user, $serverId, $amount);
+diff --git a/resources/lang/ru/admin.php b/resources/lang/ru/admin.php
+index 1ad71c1..84c4fd2 100755
+--- a/resources/lang/ru/admin.php
++++ b/resources/lang/ru/admin.php
+@@ -490,6 +490,24 @@ return [
+             'balance' => 'Баланс',
+             'empty' => 'Серверы ещё не добавлены.',
+             'info' => 'Баланс монет на каждом сервере. Изменения сохраняются вместе с профилем и пишутся в журнал валют.',
++            'site_balance' => 'Баланс на сайте',
++            'adjust' => 'Начислить/списать в игре',
++            'adjust_hint' => 'Положительное число — начислить, отрицательное — списать. Изменение уйдёт в игру очередью и сразу отразится на сайте.',
++            'reason' => 'Причина',
++            'reason_required' => 'Укажите причину начисления или списания.',
++            'insufficient' => 'Недостаточно монет на сервере.',
++            'ops_title' => 'Последние операции',
++            'op_id' => 'ID',
++            'op_amount' => 'Сумма',
++            'op_reason' => 'Причина',
++            'op_status' => 'Статус',
++            'op_error' => 'Ошибка',
++            'op_created' => 'Создана',
++            'op_applied' => 'Применена',
++            'op_balance_after' => 'В игре после',
++            'status_pending' => 'ожидание',
++            'status_applied' => 'применено',
++            'status_failed' => 'ошибка',
+         ],
+ 
+         'coins_transfer' => [
+diff --git a/resources/views/admin/users/edit.blade.php b/resources/views/admin/users/edit.blade.php
+index 2b1c5dc..5574822 100755
+--- a/resources/views/admin/users/edit.blade.php
++++ b/resources/views/admin/users/edit.blade.php
+@@ -229,40 +229,121 @@
+                             @if($servers->isEmpty() && $balancesByServerId->isEmpty())
+                                 <p class="text-muted mb-1">{{ trans('admin.users.server_balances.empty') }}</p>
+                             @else
+-                                <div class="table-responsive" style="max-height: 16rem; overflow-y: auto;">
++                                <div class="table-responsive">
+                                     <table class="table table-sm table-bordered mb-1">
+-                                        <thead class="sticky-top" style="background: var(--bs-body-bg);">
++                                        <thead>
+                                         <tr>
+                                             <th>{{ trans('admin.users.server_balances.server') }}</th>
+-                                            <th style="width: 12rem">{{ trans('admin.users.server_balances.balance') }}</th>
++                                            <th>{{ trans('admin.users.server_balances.balance') }}</th>
+                                         </tr>
+                                         </thead>
+                                         <tbody>
+                                         @foreach($servers as $server)
+                                             @php
+-                                                $currentBalance = old('server_balances.'.$server->id, $balancesByServerId->get($server->id)?->balance ?? 0);
++                                                $currentBalance = $balancesByServerId->get($server->id)?->balance ?? 0;
++                                                $queueOn = $queueEnabledByServerId[$server->id] ?? false;
++                                                $ops = $recentOpsByServerId[$server->id] ?? collect();
+                                             @endphp
+                                             <tr>
+-                                                <td>
++                                                <td class="align-top">
+                                                     {{ $server->name }}
+                                                     <span class="text-muted">(#{{ $server->id }})</span>
+                                                 </td>
+                                                 <td>
+-                                                    @can('admin.users.money')
+-                                                    <div class="input-group input-group-sm">
+-                                                        <input type="number" min="0" max="999999999999" step="0.01"
+-                                                               class="form-control @error('server_balances.'.$server->id) is-invalid @enderror"
+-                                                               name="server_balances[{{ $server->id }}]"
+-                                                               value="{{ $currentBalance }}"
+-                                                               @disabled($user->isDeleted())>
+-                                                        <span class="input-group-text">{{ coins_name() }}</span>
+-                                                    </div>
+-                                                    @error('server_balances.'.$server->id)
+-                                                    <span class="invalid-feedback d-block" role="alert"><strong>{{ $message }}</strong></span>
+-                                                    @enderror
++                                                    @if($queueOn)
++                                                        <div class="mb-2">
++                                                            <div class="form-text mb-0">{{ trans('admin.users.server_balances.site_balance') }}</div>
++                                                            <strong>{{ format_coins((float) $currentBalance) }}</strong>
++                                                        </div>
++                                                        @can('admin.users.money')
++                                                        <div class="mb-2">
++                                                            <label class="form-label" for="serverAdjust{{ $server->id }}">{{ trans('admin.users.server_balances.adjust') }}</label>
++                                                            <div class="input-group input-group-sm">
++                                                                <input type="number" step="1"
++                                                                       class="form-control @error('server_adjusts.'.$server->id) is-invalid @enderror"
++                                                                       id="serverAdjust{{ $server->id }}"
++                                                                       name="server_adjusts[{{ $server->id }}]"
++                                                                       value="{{ old('server_adjusts.'.$server->id, 0) }}"
++                                                                       @disabled($user->isDeleted())>
++                                                                <span class="input-group-text">{{ coins_name() }}</span>
++                                                            </div>
++                                                            @error('server_adjusts.'.$server->id)
++                                                            <span class="invalid-feedback d-block" role="alert"><strong>{{ $message }}</strong></span>
++                                                            @enderror
++                                                            <div class="form-text">{{ trans('admin.users.server_balances.adjust_hint') }}</div>
++                                                        </div>
++                                                        <div class="mb-2">
++                                                            <label class="form-label" for="serverAdjustReason{{ $server->id }}">{{ trans('admin.users.server_balances.reason') }}</label>
++                                                            <input type="text" maxlength="190"
++                                                                   class="form-control form-control-sm @error('server_adjust_reasons.'.$server->id) is-invalid @enderror"
++                                                                   id="serverAdjustReason{{ $server->id }}"
++                                                                   name="server_adjust_reasons[{{ $server->id }}]"
++                                                                   value="{{ old('server_adjust_reasons.'.$server->id) }}"
++                                                                   @disabled($user->isDeleted())>
++                                                            @error('server_adjust_reasons.'.$server->id)
++                                                            <span class="invalid-feedback d-block" role="alert"><strong>{{ $message }}</strong></span>
++                                                            @enderror
++                                                        </div>
++                                                        @endcan
++                                                        @if($ops->isNotEmpty())
++                                                            <div class="form-text mb-1">{{ trans('admin.users.server_balances.ops_title') }}</div>
++                                                            <table class="table table-sm table-borderless mb-0">
++                                                                <thead>
++                                                                <tr class="text-muted small">
++                                                                    <th>{{ trans('admin.users.server_balances.op_id') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_amount') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_reason') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_status') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_error') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_created') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_applied') }}</th>
++                                                                    <th>{{ trans('admin.users.server_balances.op_balance_after') }}</th>
++                                                                </tr>
++                                                                </thead>
++                                                                <tbody>
++                                                                @foreach($ops as $op)
++                                                                    @php
++                                                                        $statusKey = 'admin.users.server_balances.status_'.$op->status;
++                                                                        $statusLabel = trans($statusKey);
++                                                                        if ($statusLabel === $statusKey) {
++                                                                            $statusLabel = $op->status;
++                                                                        }
++                                                                        $shortId = Str::limit($op->id, 8, '');
++                                                                    @endphp
++                                                                    <tr class="small">
++                                                                        <td><code>{{ $shortId }}</code></td>
++                                                                        <td>{{ (int) $op->amount }}</td>
++                                                                        <td>{{ $op->meta['reason'] ?? '' }}</td>
++                                                                        <td>{{ $statusLabel }}</td>
++                                                                        <td>{{ $op->error }}</td>
++                                                                        <td>{{ $op->created_at?->format('d.m.Y H:i') }}</td>
++                                                                        <td>{{ $op->applied_at?->format('d.m.Y H:i') }}</td>
++                                                                        <td>{{ $op->meta['balance_after'] ?? '' }}</td>
++                                                                    </tr>
++                                                                @endforeach
++                                                                </tbody>
++                                                            </table>
++                                                        @endif
+                                                     @else
+-                                                        {{ format_coins((float) $currentBalance) }}
+-                                                    @endcan
++                                                        @php
++                                                            $formBalance = old('server_balances.'.$server->id, $currentBalance);
++                                                        @endphp
++                                                        @can('admin.users.money')
++                                                        <div class="input-group input-group-sm">
++                                                            <input type="number" min="0" max="999999999999" step="0.01"
++                                                                   class="form-control @error('server_balances.'.$server->id) is-invalid @enderror"
++                                                                   name="server_balances[{{ $server->id }}]"
++                                                                   value="{{ $formBalance }}"
++                                                                   @disabled($user->isDeleted())>
++                                                            <span class="input-group-text">{{ coins_name() }}</span>
++                                                        </div>
++                                                        @error('server_balances.'.$server->id)
++                                                        <span class="invalid-feedback d-block" role="alert"><strong>{{ $message }}</strong></span>
++                                                        @enderror
++                                                        @else
++                                                            {{ format_coins((float) $currentBalance) }}
++                                                        @endcan
++                                                    @endif
+                                                 </td>
+                                             </tr>
+                                         @endforeach
+diff --git a/tests/Feature/CurrencyServerSyncTest.php b/tests/Feature/CurrencyServerSyncTest.php
+new file mode 100644
+index 0000000..8688c68
+--- /dev/null
++++ b/tests/Feature/CurrencyServerSyncTest.php
+@@ -0,0 +1,218 @@
++<?php
++
++namespace Tests\Feature;
++
++use Azuriom\Models\CurrencyServerMovement;
++use Azuriom\Models\CurrencyServerOperation as Op;
++use Azuriom\Models\CurrencyTransaction;
++use Azuriom\Models\Server;
++use Azuriom\Models\User;
++use Azuriom\Models\UserServerBalance;
++use Azuriom\Services\Currency\CurrencyLedger;
++use Azuriom\Services\Currency\CurrencyServerSync;
++use Azuriom\Services\Currency\ServerMovementRecorder;
++use Azuriom\Services\Currency\ServerOperationQueue;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\DB;
++use InvalidArgumentException;
++use RuntimeException;
++use Tests\TestCase;
++
++/**
++ * Requires a booted Azuriom app (phpunit.xml + sqlite).
++ *
++ *   cd /var/www/main-site
++ *   php artisan test --filter=CurrencyServerSyncTest
++ *
++ * These tests assume settings() and Eloquent work as on production.
++ */
++class CurrencyServerSyncTest extends TestCase
++{
++    use RefreshDatabase;
++
++    private User $user;
++
++    private Server $server;
++
++    private CurrencyServerSync $sync;
++
++    private ServerOperationQueue $queue;
++
++    private CurrencyLedger $ledger;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        $this->user = User::factory()->create(['game_id' => 'f3fc162dd34432fa8c9a0b987b0791cf', 'coins' => 0]);
++        $this->server = Server::query()->create([
++            'name' => 'ATM10-Test',
++            'address' => '127.0.0.1',
++            'type' => 'mc-azlink',
++            'port' => 25565,
++            'data' => [],
++        ]);
++
++        DB::table('settings')->updateOrInsert(['name' => 'currency.server_queue_enabled'], ['value' => '1']);
++        DB::table('settings')->updateOrInsert(['name' => 'currency.server_queue_servers'], ['value' => (string) $this->server->id]);
++
++        $this->ledger = app(CurrencyLedger::class);
++        $this->sync = app(CurrencyServerSync::class);
++        $this->queue = app(ServerOperationQueue::class);
++
++        $this->ledger->adjustServerBalance($this->user, $this->server->id, 100, CurrencyTransaction::TYPE_ADMIN, [
++            'source' => 'seed',
++        ]);
++    }
++
++    public function test_enqueue_credit_and_debit(): void
++    {
++        $credit = $this->sync->adjust($this->user, $this->server, 50, 'Компенсация', ['source' => 'admin_user_edit']);
++        $this->assertSame(Op::ADJUST, $credit->direction);
++        $this->assertSame(50, (int) $credit->amount);
++        $this->assertSame(Op::PENDING, $credit->status);
++        $this->assertEquals(150, $this->ledger->serverBalance($this->user, $this->server->id));
++
++        $debit = $this->sync->adjust($this->user, $this->server, -30, 'штраф', ['source' => 'admin_user_edit']);
++        $this->assertSame(-30, (int) $debit->amount);
++        $this->assertEquals(120, $this->ledger->serverBalance($this->user, $this->server->id));
++    }
++
++    public function test_idempotent_enqueue(): void
++    {
++        $id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
++        $first = $this->sync->adjust($this->user, $this->server, 10, 'once', ['source' => 'api'], $id);
++        $second = $this->sync->adjust($this->user, $this->server, 10, 'once', ['source' => 'api'], $id);
++        $this->assertSame($first->id, $second->id);
++        $this->assertEquals(1, Op::query()->where('id', $id)->count());
++        $this->assertEquals(110, $this->ledger->serverBalance($this->user, $this->server->id));
++    }
++
++    public function test_debit_beyond_site_balance_rejected(): void
++    {
++        $this->expectException(RuntimeException::class);
++        $this->expectExceptionMessage('insufficient_server_coins');
++        $this->sync->adjust($this->user, $this->server, -500, 'too much', ['source' => 'admin_user_edit']);
++    }
++
++    public function test_ack_applied_stores_balance_after(): void
++    {
++        $op = $this->sync->adjust($this->user, $this->server, 20, 'plus', ['source' => 'admin_user_edit']);
++        $acked = $this->queue->ack($this->server->id, $op->id, Op::APPLIED, null, 120);
++        $this->assertSame(Op::APPLIED, $acked->status);
++        $this->assertSame(120, $acked->meta['balance_after']);
++        $this->assertEquals(0, Op::query()->where('user_id', $this->user->id)->where('status', Op::PENDING)->count());
++    }
++
++    public function test_ack_failed_compensates_site_copy(): void
++    {
++        $op = $this->sync->adjust($this->user, $this->server, 40, 'fail me', ['source' => 'admin_user_edit']);
++        $this->assertEquals(140, $this->ledger->serverBalance($this->user, $this->server->id));
++        $this->queue->ack($this->server->id, $op->id, Op::FAILED, 'insufficient_server_balance', 100);
++        $this->assertEquals(100, $this->ledger->serverBalance($this->user, $this->server->id));
++        $this->assertNotNull(CurrencyTransaction::query()->where('idempotency_key', 'op:'.$op->id.':revert')->first());
++    }
++
++    public function test_duplicate_ack_ignored(): void
++    {
++        $op = $this->sync->adjust($this->user, $this->server, 5, 'dup', ['source' => 'admin_user_edit']);
++        $this->queue->ack($this->server->id, $op->id, Op::APPLIED, null, 105);
++        $again = $this->queue->ack($this->server->id, $op->id, Op::FAILED, 'nope', 1);
++        $this->assertSame(Op::APPLIED, $again->status);
++        $this->assertEquals(105, $this->ledger->serverBalance($this->user, $this->server->id));
++    }
++
++    public function test_movement_with_site_op_id_skips_balance(): void
++    {
++        $op = $this->sync->adjust($this->user, $this->server, 10, 'mv', ['source' => 'admin_user_edit']);
++        $before = $this->ledger->serverBalance($this->user, $this->server->id);
++        $recorder = app(ServerMovementRecorder::class);
++        $recorder->record($this->server->id, [[
++            'id' => 1,
++            'timestamp' => 1791400000000,
++            'type' => 'site_to_server',
++            'amount' => 10,
++            'from_id' => $this->user->game_id,
++            'from_name' => 'Nick',
++            'to_id' => null,
++            'to_name' => 'site',
++            'note' => null,
++            'site_op_id' => $op->id,
++            'deltas' => [['uuid' => 'f3fc162d-d344-32fa-8c9a-0b987b0791cf', 'delta' => 10, 'balance_after' => 110]],
++        ]]);
++        $this->assertEquals($before, $this->ledger->serverBalance($this->user, $this->server->id));
++        $this->assertSame($op->id, CurrencyServerMovement::query()->first()->site_op_id);
++    }
++
++    public function test_movement_without_deltas_is_log_only(): void
++    {
++        $before = $this->ledger->serverBalance($this->user, $this->server->id);
++        app(ServerMovementRecorder::class)->record($this->server->id, [[
++            'id' => 2,
++            'timestamp' => 1791400000000,
++            'type' => 'pay',
++            'amount' => 5,
++            'from_id' => $this->user->game_id,
++            'from_name' => 'Nick',
++            'to_id' => null,
++            'to_name' => 'x',
++            'note' => 'old mod',
++        ]]);
++        $this->assertEquals($before, $this->ledger->serverBalance($this->user, $this->server->id));
++        $this->assertSame(1, CurrencyServerMovement::query()->count());
++    }
++
++    public function test_duplicate_movement_not_reapplied(): void
++    {
++        $payload = [[
++            'id' => 3,
++            'timestamp' => 1791400000000,
++            'type' => 'trader_buy',
++            'amount' => 40,
++            'from_id' => 'f3fc162d-d344-32fa-8c9a-0b987b0791cf',
++            'from_name' => 'Nick',
++            'to_id' => null,
++            'to_name' => 'trader',
++            'note' => 'offer=diamond',
++            'deltas' => [['uuid' => 'f3fc162d-d344-32fa-8c9a-0b987b0791cf', 'delta' => -10, 'balance_after' => 90]],
++        ]];
++        $recorder = app(ServerMovementRecorder::class);
++        $recorder->record($this->server->id, $payload);
++        $this->assertEquals(90, $this->ledger->serverBalance($this->user, $this->server->id));
++        $recorder->record($this->server->id, $payload);
++        $this->assertEquals(90, $this->ledger->serverBalance($this->user, $this->server->id));
++        $this->assertEquals(1, CurrencyServerMovement::query()->count());
++    }
++
++    public function test_drift_enqueues_exactly_one_reconcile(): void
++    {
++        $this->queue->ack($this->server->id, 'missing', Op::APPLIED, null, null);
++        app(CurrencyServerSync::class)->maybeReconcileDrift($this->user, $this->server->id, 70);
++        app(CurrencyServerSync::class)->maybeReconcileDrift($this->user, $this->server->id, 70);
++        $pending = Op::query()
++            ->where('user_id', $this->user->id)
++            ->where('server_id', $this->server->id)
++            ->where('status', Op::PENDING)
++            ->where('direction', Op::ADJUST)
++            ->get()
++            ->filter(fn (Op $op) => ($op->meta['source'] ?? '') === 'reconcile');
++        $this->assertCount(1, $pending);
++        $this->assertSame(30, (int) $pending->first()->amount);
++        $this->assertEquals(100, $this->ledger->serverBalance($this->user, $this->server->id));
++    }
++
++    public function test_queue_disabled_uses_direct_adjust(): void
++    {
++        DB::table('settings')->where('name', 'currency.server_queue_enabled')->update(['value' => '0']);
++        $tx = $this->sync->adjust($this->user, $this->server, 7, 'legacy', ['source' => 'admin_user_edit']);
++        $this->assertInstanceOf(CurrencyTransaction::class, $tx);
++        $this->assertEquals(107, $this->ledger->serverBalance($this->user, $this->server->id));
++        $this->assertEquals(0, Op::query()->where('direction', Op::ADJUST)->count());
++    }
++
++    public function test_zero_delta_rejected_unless_reconcile(): void
++    {
++        $this->expectException(InvalidArgumentException::class);
++        $this->sync->adjust($this->user, $this->server, 0, '', ['source' => 'admin_user_edit']);
++    }
++}
+-- 
+2.43.0
+

@@ -1,0 +1,779 @@
+From 6aea71fd479c6ae9db74d9c319e0d38520b7eead Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 17:52:21 +0000
+Subject: [PATCH 1/2] Gluon adjust queue: per-server flag, CurrencyServerSync,
+ ack and movements
+
+Add currency.server_queue_servers (empty = all mc-azlink) and enabledFor().
+Queue direction=adjust with a signed amount; site copy updates at enqueue
+except reconcile. Ack stores balance_after, reverts failed adjust, and
+syncs to_server/from_server site copies. Movements store deltas/site_op_id
+and update the mirror unless the movement came from a site op.
+---
+ .../Api/ServerMovementController.php          |   5 +
+ .../Api/ServerOperationController.php         |  17 +-
+ app/Models/CurrencyServerMovement.php         |   5 +-
+ app/Models/CurrencyServerOperation.php        |   4 +-
+ app/Models/CurrencyTransaction.php            |   4 +
+ app/Services/Currency/CurrencyLedger.php      |  36 +++-
+ app/Services/Currency/CurrencyServerSync.php  | 119 ++++++++++++++
+ .../Currency/ServerMovementRecorder.php       | 107 +++++++++++-
+ .../Currency/ServerOperationQueue.php         | 154 ++++++++++++++++--
+ ...rver_queue_servers_and_movement_deltas.php |  45 +++++
+ 10 files changed, 467 insertions(+), 29 deletions(-)
+ create mode 100644 app/Services/Currency/CurrencyServerSync.php
+ create mode 100644 database/migrations/2026_10_07_200000_add_server_queue_servers_and_movement_deltas.php
+
+diff --git a/app/Http/Controllers/Api/ServerMovementController.php b/app/Http/Controllers/Api/ServerMovementController.php
+index a1b1c1d..f8f0d93 100644
+--- a/app/Http/Controllers/Api/ServerMovementController.php
++++ b/app/Http/Controllers/Api/ServerMovementController.php
+@@ -28,6 +28,11 @@ class ServerMovementController extends Controller
+             'movements.*.to_id' => ['nullable', 'string', 'max:36'],
+             'movements.*.to_name' => ['nullable', 'string', 'max:64'],
+             'movements.*.note' => ['nullable', 'string', 'max:500'],
++            'movements.*.site_op_id' => ['nullable', 'string', 'max:64'],
++            'movements.*.deltas' => ['nullable', 'array'],
++            'movements.*.deltas.*.uuid' => ['required', 'string', 'max:36'],
++            'movements.*.deltas.*.delta' => ['required', 'integer'],
++            'movements.*.deltas.*.balance_after' => ['nullable', 'integer'],
+         ]);
+ 
+         return response()->json($recorder->record((int) $request->input('server-id'), $data['movements']));
+diff --git a/app/Http/Controllers/Api/ServerOperationController.php b/app/Http/Controllers/Api/ServerOperationController.php
+index 3ddd4c1..bf42d15 100644
+--- a/app/Http/Controllers/Api/ServerOperationController.php
++++ b/app/Http/Controllers/Api/ServerOperationController.php
+@@ -22,6 +22,10 @@ class ServerOperationController extends Controller
+ 
+         $serverId = (int) $request->input('server-id');
+ 
++        if (! ServerOperationQueue::enabledFor($serverId)) {
++            return response()->json(['operations' => []]);
++        }
++
+         return response()->json([
+             'operations' => $this->queue->pending($serverId, (int) $request->query('limit', 50))->values(),
+         ]);
+@@ -34,9 +38,20 @@ class ServerOperationController extends Controller
+         $data = $this->validate($request, [
+             'status' => ['required', 'in:applied,failed'],
+             'error' => ['nullable', 'string', 'max:500'],
++            'balance_after' => ['nullable', 'integer'],
+         ]);
+ 
+-        $op = $this->queue->ack((int) $request->input('server-id'), $operation, $data['status'], $data['error'] ?? null);
++        $balanceAfter = array_key_exists('balance_after', $data) && $data['balance_after'] !== null
++            ? (int) $data['balance_after']
++            : null;
++
++        $op = $this->queue->ack(
++            (int) $request->input('server-id'),
++            $operation,
++            $data['status'],
++            $data['error'] ?? null,
++            $balanceAfter,
++        );
+ 
+         if ($op === null) {
+             return response()->json(['message' => 'not_found'], 404);
+diff --git a/app/Models/CurrencyServerMovement.php b/app/Models/CurrencyServerMovement.php
+index 8cd4149..06b5a2a 100644
+--- a/app/Models/CurrencyServerMovement.php
++++ b/app/Models/CurrencyServerMovement.php
+@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ /**
+  * A gluon movement inside a game server wallet (pay, trader, admin, site transfer).
+- * Display-only: never affects site balances.
++ * With deltas, newly stored rows update the site per-server mirror (unless site_op_id is set).
+  */
+ class CurrencyServerMovement extends Model
+ {
+@@ -26,12 +26,13 @@ class CurrencyServerMovement extends Model
+ 
+     protected $fillable = [
+         'server_id', 'movement_id', 'type', 'amount', 'from_uuid', 'from_name', 'from_user_id',
+-        'to_uuid', 'to_name', 'to_user_id', 'note', 'occurred_at',
++        'to_uuid', 'to_name', 'to_user_id', 'note', 'site_op_id', 'deltas', 'occurred_at',
+     ];
+ 
+     protected $casts = [
+         'amount' => 'integer',
+         'movement_id' => 'integer',
++        'deltas' => 'array',
+         'occurred_at' => 'datetime',
+     ];
+ 
+diff --git a/app/Models/CurrencyServerOperation.php b/app/Models/CurrencyServerOperation.php
+index f0d9711..187206f 100644
+--- a/app/Models/CurrencyServerOperation.php
++++ b/app/Models/CurrencyServerOperation.php
+@@ -6,7 +6,7 @@ use Illuminate\Database\Eloquent\Model;
+ use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ /**
+- * Queued gluon transfer between the shared site wallet and one game server wallet.
++ * Queued gluon transfer (to_server / from_server) or per-server adjust.
+  *
+  * @property string $id
+  * @property int $user_id
+@@ -25,6 +25,8 @@ class CurrencyServerOperation extends Model
+ 
+     public const FROM_SERVER = 'from_server';
+ 
++    public const ADJUST = 'adjust';
++
+     public const PENDING = 'pending';
+ 
+     public const APPLIED = 'applied';
+diff --git a/app/Models/CurrencyTransaction.php b/app/Models/CurrencyTransaction.php
+index 373fb96..6ffece5 100644
+--- a/app/Models/CurrencyTransaction.php
++++ b/app/Models/CurrencyTransaction.php
+@@ -49,6 +49,10 @@ class CurrencyTransaction extends Model
+ 
+     public const TYPE_ADMIN = 'admin';
+ 
++    public const TYPE_SERVER_ADJUST = 'server_adjust';
++
++    public const TYPE_SERVER_SYNC = 'server_sync';
++
+     /**
+      * @var array<int, string>
+      */
+diff --git a/app/Services/Currency/CurrencyLedger.php b/app/Services/Currency/CurrencyLedger.php
+index cec44e3..e9bf0b2 100644
+--- a/app/Services/Currency/CurrencyLedger.php
++++ b/app/Services/Currency/CurrencyLedger.php
+@@ -95,18 +95,25 @@ class CurrencyLedger
+     /**
+      * Adjust a per-server coins balance.
+      */
+-    public function adjustServerBalance(User $user, int $serverId, float $amount, string $type, array $meta = [], ?string $idempotencyKey = null): CurrencyTransaction
+-    {
++    public function adjustServerBalance(
++        User $user,
++        int $serverId,
++        float $amount,
++        string $type,
++        array $meta = [],
++        ?string $idempotencyKey = null,
++        bool $clampAtZero = false,
++    ): CurrencyTransaction {
+         if ($existing = $this->findByIdempotency($idempotencyKey)) {
+             return $existing;
+         }
+ 
+-        return $this->onceByKey($idempotencyKey, fn () => DB::transaction(function () use ($user, $serverId, $amount, $type, $meta, $idempotencyKey) {
++        return $this->onceByKey($idempotencyKey, fn () => DB::transaction(function () use ($user, $serverId, $amount, $type, $meta, $idempotencyKey, $clampAtZero) {
+             if ($amount > 0 && $type === CurrencyTransaction::TYPE_SERVER_EARN) {
+                 $this->assertDailyServerEarnCap($user, $serverId, $amount);
+             }
+ 
+-            return $this->mutateServerBalance($user, $serverId, $amount, $type, $meta, $idempotencyKey);
++            return $this->mutateServerBalance($user, $serverId, $amount, $type, $meta, $idempotencyKey, $clampAtZero);
+         }));
+     }
+ 
+@@ -312,8 +319,15 @@ class CurrencyLedger
+         return $this->write($locked->id, CurrencyTransaction::CURRENCY_COINS, $amount, $newBalance, $type, $serverId, $meta, $idempotencyKey);
+     }
+ 
+-    protected function mutateServerBalance(User $user, int $serverId, float $amount, string $type, array $meta = [], ?string $idempotencyKey = null): CurrencyTransaction
+-    {
++    protected function mutateServerBalance(
++        User $user,
++        int $serverId,
++        float $amount,
++        string $type,
++        array $meta = [],
++        ?string $idempotencyKey = null,
++        bool $clampAtZero = false,
++    ): CurrencyTransaction {
+         $balance = UserServerBalance::query()
+             ->where('user_id', $user->id)
+             ->where('server_id', $serverId)
+@@ -334,10 +348,16 @@ class CurrencyLedger
+                 ->firstOrFail();
+         }
+ 
+-        $newBalance = round(((float) $balance->balance) + $amount, 2);
++        $current = (float) $balance->balance;
++        $newBalance = round($current + $amount, 2);
+ 
+         if ($newBalance < 0) {
+-            throw new RuntimeException('insufficient_server_coins');
++            if (! $clampAtZero) {
++                throw new RuntimeException('insufficient_server_coins');
++            }
++
++            $amount = -$current;
++            $newBalance = 0.0;
+         }
+ 
+         $balance->update(['balance' => $newBalance]);
+diff --git a/app/Services/Currency/CurrencyServerSync.php b/app/Services/Currency/CurrencyServerSync.php
+new file mode 100644
+index 0000000..cc731b1
+--- /dev/null
++++ b/app/Services/Currency/CurrencyServerSync.php
+@@ -0,0 +1,119 @@
++<?php
++
++namespace Azuriom\Services\Currency;
++
++use Azuriom\Models\CurrencyServerOperation as Op;
++use Azuriom\Models\CurrencyTransaction;
++use Azuriom\Models\Server;
++use Azuriom\Models\User;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
++use InvalidArgumentException;
++
++/**
++ * Authoritative per-server gluon adjustments. When the queue is on for the server,
++ * the site copy is updated immediately and a direction=adjust operation is queued
++ * for the game. Reconcile ops never mutate the site copy (the site is already correct).
++ */
++class CurrencyServerSync
++{
++    public function __construct(private CurrencyLedger $ledger)
++    {
++    }
++
++    public function adjust(
++        User $user,
++        Server|int $server,
++        int $delta,
++        string $reason,
++        array $meta = [],
++        ?string $operationId = null
++    ): Op|CurrencyTransaction {
++        $serverId = $server instanceof Server ? (int) $server->id : (int) $server;
++        $reason = Str::limit(trim($reason), 190, '');
++        $source = (string) ($meta['source'] ?? 'api');
++        $isReconcile = $source === 'reconcile';
++
++        if ($delta === 0 && ! $isReconcile) {
++            throw new InvalidArgumentException('Amount must be a non-zero integer.');
++        }
++
++        if (! ServerOperationQueue::enabledFor($serverId)) {
++            if ($delta === 0) {
++                throw new InvalidArgumentException('Amount must be a non-zero integer.');
++            }
++
++            return $this->ledger->adjustServerBalance($user, $serverId, $delta, CurrencyTransaction::TYPE_ADMIN, [
++                'reason' => $reason,
++                ...$meta,
++            ]);
++        }
++
++        $id = $operationId ?? (string) Str::uuid();
++
++        if ($existing = Op::find($id)) {
++            return $existing;
++        }
++
++        return DB::transaction(function () use ($user, $serverId, $delta, $reason, $meta, $source, $isReconcile, $id) {
++            if ($delta !== 0 && ! $isReconcile) {
++                $this->ledger->adjustServerBalance(
++                    $user,
++                    $serverId,
++                    $delta,
++                    CurrencyTransaction::TYPE_SERVER_ADJUST,
++                    [
++                        'reason' => $reason,
++                        'operation_id' => $id,
++                        'status' => Op::PENDING,
++                        ...$meta,
++                    ],
++                    "op:{$id}:site",
++                );
++            }
++
++            return Op::create([
++                'id' => $id,
++                'user_id' => $user->id,
++                'server_id' => $serverId,
++                'direction' => Op::ADJUST,
++                'amount' => $delta,
++                'status' => Op::PENDING,
++                'meta' => array_filter([
++                    'reason' => $reason,
++                    'source' => $source,
++                    ...$meta,
++                ], fn ($v) => $v !== null && $v !== ''),
++            ]);
++        });
++    }
++
++    /**
++     * If the game reports a wallet total and nothing is pending, enqueue at most one
++     * reconcile adjust so the game converges to the site copy.
++     */
++    public function maybeReconcileDrift(User $user, int $serverId, ?int $balanceAfter): void
++    {
++        if ($balanceAfter === null || ! ServerOperationQueue::enabledFor($serverId)) {
++            return;
++        }
++
++        $pending = Op::query()
++            ->where('user_id', $user->id)
++            ->where('server_id', $serverId)
++            ->where('status', Op::PENDING)
++            ->get();
++
++        if ($pending->isNotEmpty()) {
++            return;
++        }
++
++        $site = (int) round($this->ledger->serverBalance($user, $serverId));
++
++        if ($site === $balanceAfter) {
++            return;
++        }
++
++        $this->adjust($user, $serverId, $site - $balanceAfter, 'reconcile', ['source' => 'reconcile']);
++    }
++}
+diff --git a/app/Services/Currency/ServerMovementRecorder.php b/app/Services/Currency/ServerMovementRecorder.php
+index 5e67db8..cdb5790 100644
+--- a/app/Services/Currency/ServerMovementRecorder.php
++++ b/app/Services/Currency/ServerMovementRecorder.php
+@@ -3,16 +3,22 @@
+ namespace Azuriom\Services\Currency;
+ 
+ use Azuriom\Models\CurrencyServerMovement;
++use Azuriom\Models\CurrencyTransaction;
+ use Azuriom\Models\User;
+ use Illuminate\Support\Carbon;
+ use Illuminate\Support\Str;
+ 
+ /**
+  * Stores batches of server-wallet movements. Idempotent by (server_id, movement_id):
+- * re-sent movements are ignored. Never changes site balances.
++ * re-sent movements are ignored. For a newly created row, deltas update the site
++ * per-server mirror unless site_op_id is set (the site already applied that op).
+  */
+ class ServerMovementRecorder
+ {
++    public function __construct(private CurrencyLedger $ledger)
++    {
++    }
++
+     /**
+      * @param  array<int, array<string, mixed>>  $movements
+      * @return array{stored: int, duplicates: int, accepted_up_to: int}
+@@ -30,15 +36,28 @@ class ServerMovementRecorder
+                     $uuids[] = $this->normalizeUuid((string) $m[$key]);
+                 }
+             }
++
++            if (! empty($m['deltas']) && is_array($m['deltas'])) {
++                foreach ($m['deltas'] as $delta) {
++                    if (! empty($delta['uuid'])) {
++                        $uuids[] = $this->normalizeUuid((string) $delta['uuid']);
++                    }
++                }
++            }
+         }
+ 
+         $users = $this->usersByUuid(array_unique(array_filter($uuids)));
++        $sync = app(CurrencyServerSync::class);
+ 
+         foreach ($movements as $m) {
+             $id = (int) $m['id'];
+             $maxId = max($maxId, $id);
+             $from = ! empty($m['from_id']) ? $this->normalizeUuid((string) $m['from_id']) : null;
+             $to = ! empty($m['to_id']) ? $this->normalizeUuid((string) $m['to_id']) : null;
++            $siteOpId = isset($m['site_op_id']) && $m['site_op_id'] !== null && $m['site_op_id'] !== ''
++                ? Str::limit((string) $m['site_op_id'], 64, '')
++                : null;
++            $deltas = isset($m['deltas']) && is_array($m['deltas']) ? $m['deltas'] : null;
+ 
+             $row = CurrencyServerMovement::query()->firstOrCreate(
+                 ['server_id' => $serverId, 'movement_id' => $id],
+@@ -52,16 +71,94 @@ class ServerMovementRecorder
+                     'to_name' => isset($m['to_name']) ? Str::limit((string) $m['to_name'], 64, '') : null,
+                     'to_user_id' => $to !== null ? ($users[$to] ?? null) : null,
+                     'note' => isset($m['note']) ? Str::limit((string) $m['note'], 180) : null,
++                    'site_op_id' => $siteOpId,
++                    'deltas' => $deltas,
+                     'occurred_at' => Carbon::createFromTimestampMs((int) $m['timestamp']),
+                 ]
+             );
+ 
+-            $row->wasRecentlyCreated ? $stored++ : $duplicates++;
++            if (! $row->wasRecentlyCreated) {
++                $duplicates++;
++
++                continue;
++            }
++
++            $stored++;
++
++            if ($siteOpId !== null || $deltas === null) {
++                if ($deltas !== null) {
++                    $this->runDriftFromDeltas($sync, $users, $serverId, $deltas);
++                }
++
++                continue;
++            }
++
++            foreach ($deltas as $entry) {
++                $uuid = $this->normalizeUuid((string) ($entry['uuid'] ?? ''));
++
++                if ($uuid === null || ! isset($users[$uuid])) {
++                    continue;
++                }
++
++                $user = User::query()->find($users[$uuid]);
++
++                if ($user === null) {
++                    continue;
++                }
++
++                $delta = (int) ($entry['delta'] ?? 0);
++
++                if ($delta !== 0) {
++                    $this->ledger->adjustServerBalance(
++                        $user,
++                        $serverId,
++                        $delta,
++                        CurrencyTransaction::TYPE_SERVER_SYNC,
++                        [
++                            'movement_id' => $id,
++                            'uuid' => $uuid,
++                        ],
++                        'mv:'.$serverId.':'.$id.':'.$uuid,
++                        true,
++                    );
++                }
++
++                $balanceAfter = array_key_exists('balance_after', $entry) && $entry['balance_after'] !== null
++                    ? (int) $entry['balance_after']
++                    : null;
++                $sync->maybeReconcileDrift($user, $serverId, $balanceAfter);
++            }
+         }
+ 
+         return ['stored' => $stored, 'duplicates' => $duplicates, 'accepted_up_to' => $maxId];
+     }
+ 
++    /**
++     * @param  array<string, int>  $users
++     * @param  array<int, array<string, mixed>>  $deltas
++     */
++    private function runDriftFromDeltas(CurrencyServerSync $sync, array $users, int $serverId, array $deltas): void
++    {
++        foreach ($deltas as $entry) {
++            $uuid = $this->normalizeUuid((string) ($entry['uuid'] ?? ''));
++
++            if ($uuid === null || ! isset($users[$uuid])) {
++                continue;
++            }
++
++            $user = User::query()->find($users[$uuid]);
++
++            if ($user === null) {
++                continue;
++            }
++
++            $balanceAfter = array_key_exists('balance_after', $entry) && $entry['balance_after'] !== null
++                ? (int) $entry['balance_after']
++                : null;
++            $sync->maybeReconcileDrift($user, $serverId, $balanceAfter);
++        }
++    }
++
+     private function normalizeUuid(string $value): ?string
+     {
+         $hex = strtolower(str_replace('-', '', trim($value)));
+@@ -87,7 +184,11 @@ class ServerMovementRecorder
+         $map = [];
+ 
+         foreach (User::query()->whereIn('game_id', $candidates)->get(['id', 'game_id']) as $user) {
+-            $map[$this->normalizeUuid((string) $user->game_id)] = $user->id;
++            $normalized = $this->normalizeUuid((string) $user->game_id);
++
++            if ($normalized !== null) {
++                $map[$normalized] = $user->id;
++            }
+         }
+ 
+         return $map;
+diff --git a/app/Services/Currency/ServerOperationQueue.php b/app/Services/Currency/ServerOperationQueue.php
+index 001d9b3..ca9fa82 100644
+--- a/app/Services/Currency/ServerOperationQueue.php
++++ b/app/Services/Currency/ServerOperationQueue.php
+@@ -4,19 +4,25 @@ namespace Azuriom\Services\Currency;
+ 
+ use Azuriom\Models\CurrencyServerOperation as Op;
+ use Azuriom\Models\CurrencyTransaction;
++use Azuriom\Models\Server;
+ use Azuriom\Models\User;
+ use Illuminate\Support\Collection;
+ use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Str;
+ use InvalidArgumentException;
++use RuntimeException;
+ 
+ /**
+- * Site-side queue of gluon transfers site <-> server.
++ * Site-side queue of gluon transfers site <-> server and per-server adjust ops.
+  *
+  * to_server:   site wallet is debited at enqueue (ledger key op:{id}:debit); server credits on pull;
+- *              a failed ack refunds the site wallet (op:{id}:refund).
++ *              a failed ack refunds the site wallet (op:{id}:refund). On applied, the per-server
++ *              site copy is credited (op:{id}:server) when the queue is enabled for that server.
+  * from_server: nothing moves at enqueue; server debits its wallet on pull and acks applied,
+- *              then the site wallet is credited (op:{id}:credit). A failed ack changes nothing.
++ *              then the site wallet is credited (op:{id}:credit) and the per-server copy is
++ *              debited (op:{id}:server).
++ * adjust:      site per-server copy is updated at enqueue (op:{id}:site) except reconcile;
++ *              never touches users.coins. A failed ack reverts the site copy (op:{id}:revert).
+  *
+  * Every ledger write carries a unique idempotency key, so replays/double acks never apply twice.
+  * The server applies operations for offline players as well (wallet is keyed by UUID).
+@@ -32,6 +38,36 @@ class ServerOperationQueue
+         return (bool) setting('currency.server_queue_enabled', false);
+     }
+ 
++    /**
++     * Queue is on globally, the server is mc-azlink, and either the allow-list is empty
++     * (all mc-azlink servers) or this server id is listed in currency.server_queue_servers.
++     */
++    public static function enabledFor(int|Server $server): bool
++    {
++        if (! self::enabled()) {
++            return false;
++        }
++
++        $model = $server instanceof Server ? $server : Server::query()->find((int) $server);
++
++        if ($model === null || $model->type !== 'mc-azlink') {
++            return false;
++        }
++
++        $raw = trim((string) setting('currency.server_queue_servers', ''));
++
++        if ($raw === '') {
++            return true;
++        }
++
++        $ids = array_values(array_filter(array_map(
++            static fn (string $part) => (int) trim($part),
++            explode(',', $raw)
++        ), static fn (int $id) => $id > 0));
++
++        return in_array((int) $model->id, $ids, true);
++    }
++
+     public function enqueue(User $user, int $serverId, string $direction, int $amount, array $meta = [], ?string $id = null): Op
+     {
+         if ($amount <= 0) {
+@@ -83,33 +119,50 @@ class ServerOperationQueue
+             Op::whereIn('id', $ops->modelKeys())->increment('deliveries');
+         }
+ 
+-        return $ops->map(fn (Op $op) => [
+-            'id' => $op->id,
+-            'user_id' => $op->user_id,
+-            'game_id' => $op->user?->game_id,
+-            'name' => $op->user?->name,
+-            'amount' => (string) $op->amount,
+-            'direction' => $op->direction,
+-            'created_at' => $op->created_at?->toIso8601String(),
+-        ]);
++        return $ops->map(function (Op $op) {
++            $meta = $op->meta ?? [];
++            $payload = [
++                'id' => $op->id,
++                'user_id' => $op->user_id,
++                'game_id' => $op->user?->game_id,
++                'name' => $op->user?->name,
++                'direction' => $op->direction,
++                'reason' => Str::limit((string) ($meta['reason'] ?? ''), 190, ''),
++                'source' => (string) ($meta['source'] ?? ''),
++            ];
++
++            if ($op->direction === Op::ADJUST) {
++                $payload['amount'] = (int) $op->amount;
++            } else {
++                $payload['amount'] = (string) $op->amount;
++            }
++
++            $payload['created_at'] = $op->created_at?->toIso8601String();
++
++            return $payload;
++        });
+     }
+ 
+     /**
+      * Idempotent: an already final operation is returned unchanged.
+      */
+-    public function ack(int $serverId, string $id, string $status, ?string $error = null): ?Op
++    public function ack(int $serverId, string $id, string $status, ?string $error = null, ?int $balanceAfter = null): ?Op
+     {
+         if (! in_array($status, [Op::APPLIED, Op::FAILED], true)) {
+             throw new InvalidArgumentException('Unknown status.');
+         }
+ 
+-        return DB::transaction(function () use ($serverId, $id, $status, $error) {
++        $finalized = false;
++
++        $op = DB::transaction(function () use ($serverId, $id, $status, $error, $balanceAfter, &$finalized) {
+             $op = Op::query()->whereKey($id)->where('server_id', $serverId)->lockForUpdate()->first();
+ 
+             if ($op === null || $op->status !== Op::PENDING) {
+                 return $op;
+             }
+ 
++            $finalized = true;
++
+             $user = User::findOrFail($op->user_id);
+             $amount = (float) $op->amount;
+ 
+@@ -125,13 +178,86 @@ class ServerOperationQueue
+                 ], "op:{$op->id}:refund", $serverId);
+             }
+ 
++            if ($status === Op::FAILED && $op->direction === Op::ADJUST) {
++                $delta = (int) $op->amount;
++                $source = (string) (($op->meta ?? [])['source'] ?? '');
++
++                if ($delta !== 0 && $source !== 'reconcile') {
++                    $this->ledger->adjustServerBalance(
++                        $user,
++                        $op->server_id,
++                        -$delta,
++                        CurrencyTransaction::TYPE_SERVER_ADJUST,
++                        [
++                            'operation_id' => $op->id,
++                            'reason' => $error,
++                            'reversal' => true,
++                        ],
++                        "op:{$op->id}:revert",
++                    );
++                }
++            }
++
++            if ($status === Op::APPLIED && self::enabledFor($op->server_id)) {
++                $this->syncPerServerCopy($user, $op);
++            }
++
++            $meta = $op->meta ?? [];
++
++            if ($balanceAfter !== null) {
++                $meta['balance_after'] = $balanceAfter;
++            }
++
+             $op->forceFill([
+                 'status' => $status,
+                 'error' => $error !== null ? Str::limit($error, 180) : null,
+                 'applied_at' => $status === Op::APPLIED ? now() : null,
++                'meta' => $meta === [] ? null : $meta,
+             ])->save();
+ 
+             return $op;
+         });
++
++        if ($finalized && $op !== null && $balanceAfter !== null) {
++            $user = User::find($op->user_id);
++
++            if ($user !== null) {
++                app(CurrencyServerSync::class)->maybeReconcileDrift($user, $op->server_id, $balanceAfter);
++            }
++        }
++
++        return $op;
++    }
++
++    private function syncPerServerCopy(User $user, Op $op): void
++    {
++        if ($op->direction === Op::TO_SERVER) {
++            try {
++                $this->ledger->adjustServerBalance(
++                    $user,
++                    $op->server_id,
++                    (float) $op->amount,
++                    CurrencyTransaction::TYPE_SERVER_SYNC,
++                    ['operation_id' => $op->id, 'direction' => 'to_server'],
++                    "op:{$op->id}:server",
++                );
++            } catch (RuntimeException) {
++                // already applied via another path
++            }
++
++            return;
++        }
++
++        if ($op->direction === Op::FROM_SERVER) {
++            $this->ledger->adjustServerBalance(
++                $user,
++                $op->server_id,
++                -((float) $op->amount),
++                CurrencyTransaction::TYPE_SERVER_SYNC,
++                ['operation_id' => $op->id, 'direction' => 'from_server'],
++                "op:{$op->id}:server",
++                true,
++            );
++        }
+     }
+ }
+diff --git a/database/migrations/2026_10_07_200000_add_server_queue_servers_and_movement_deltas.php b/database/migrations/2026_10_07_200000_add_server_queue_servers_and_movement_deltas.php
+new file mode 100644
+index 0000000..0fc01cc
+--- /dev/null
++++ b/database/migrations/2026_10_07_200000_add_server_queue_servers_and_movement_deltas.php
+@@ -0,0 +1,45 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        if (! DB::table('settings')->where('name', 'currency.server_queue_servers')->exists()) {
++            DB::table('settings')->insert(['name' => 'currency.server_queue_servers', 'value' => '']);
++        }
++
++        if (Schema::hasTable('currency_server_movements')) {
++            Schema::table('currency_server_movements', function (Blueprint $table) {
++                if (! Schema::hasColumn('currency_server_movements', 'site_op_id')) {
++                    $table->string('site_op_id', 64)->nullable()->after('note');
++                }
++
++                if (! Schema::hasColumn('currency_server_movements', 'deltas')) {
++                    $table->json('deltas')->nullable()->after('site_op_id');
++                }
++            });
++        }
++    }
++
++    public function down(): void
++    {
++        DB::table('settings')->where('name', 'currency.server_queue_servers')->delete();
++
++        if (Schema::hasTable('currency_server_movements')) {
++            Schema::table('currency_server_movements', function (Blueprint $table) {
++                if (Schema::hasColumn('currency_server_movements', 'deltas')) {
++                    $table->dropColumn('deltas');
++                }
++
++                if (Schema::hasColumn('currency_server_movements', 'site_op_id')) {
++                    $table->dropColumn('site_op_id');
++                }
++            });
++        }
++    }
++};
+-- 
+2.43.0
+
