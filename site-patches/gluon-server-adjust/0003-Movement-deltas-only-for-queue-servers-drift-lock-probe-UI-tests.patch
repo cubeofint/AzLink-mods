@@ -1,0 +1,336 @@
+diff --git a/app/Console/Commands/CurrencyServerSyncProbeCommand.php b/app/Console/Commands/CurrencyServerSyncProbeCommand.php
+index c344504..8413703 100644
+--- a/app/Console/Commands/CurrencyServerSyncProbeCommand.php
++++ b/app/Console/Commands/CurrencyServerSyncProbeCommand.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Azuriom\Console\Commands;
+ 
++use Azuriom\Models\CurrencyServerOperation;
+ use Azuriom\Models\Server;
+ use Azuriom\Models\User;
+ use Azuriom\Models\UserServerBalance;
+@@ -57,6 +58,13 @@ class CurrencyServerSyncProbeCommand extends Command
+         $count = 0;
+ 
+         foreach ($users as $user) {
++            if (CurrencyServerOperation::query()->where('user_id', $user->id)->where('server_id', $serverId)
++                ->where('status', CurrencyServerOperation::PENDING)->exists()) {
++                $this->line("skip user {$user->id} {$user->name}: pending op exists");
++
++                continue;
++            }
++
+             $op = $sync->adjust($user, $server, 0, 'reconcile', ['source' => 'reconcile']);
+             $this->line("probe {$op->id} user {$user->id} {$user->name}");
+             $count++;
+diff --git a/app/Services/Currency/CurrencyServerSync.php b/app/Services/Currency/CurrencyServerSync.php
+index cc731b1..7af86ab 100644
+--- a/app/Services/Currency/CurrencyServerSync.php
++++ b/app/Services/Currency/CurrencyServerSync.php
+@@ -98,22 +98,28 @@ class CurrencyServerSync
+             return;
+         }
+ 
+-        $pending = Op::query()
+-            ->where('user_id', $user->id)
+-            ->where('server_id', $serverId)
+-            ->where('status', Op::PENDING)
+-            ->get();
+-
+-        if ($pending->isNotEmpty()) {
+-            return;
+-        }
++        DB::transaction(function () use ($user, $serverId, $balanceAfter) {
++            // Serialize concurrent ack/movement requests for this user so two of them
++            // cannot both see "no pending" and enqueue two reconcile ops.
++            User::query()->whereKey($user->id)->lockForUpdate()->first();
++
++            $pending = Op::query()
++                ->where('user_id', $user->id)
++                ->where('server_id', $serverId)
++                ->where('status', Op::PENDING)
++                ->exists();
++
++            if ($pending) {
++                return;
++            }
+ 
+-        $site = (int) round($this->ledger->serverBalance($user, $serverId));
++            $site = (int) round($this->ledger->serverBalance($user, $serverId));
+ 
+-        if ($site === $balanceAfter) {
+-            return;
+-        }
++            if ($site === $balanceAfter) {
++                return;
++            }
+ 
+-        $this->adjust($user, $serverId, $site - $balanceAfter, 'reconcile', ['source' => 'reconcile']);
++            $this->adjust($user, $serverId, $site - $balanceAfter, 'reconcile', ['source' => 'reconcile']);
++        });
+     }
+ }
+diff --git a/app/Services/Currency/ServerMovementRecorder.php b/app/Services/Currency/ServerMovementRecorder.php
+index cdb5790..81da747 100644
+--- a/app/Services/Currency/ServerMovementRecorder.php
++++ b/app/Services/Currency/ServerMovementRecorder.php
+@@ -6,6 +6,7 @@ use Azuriom\Models\CurrencyServerMovement;
+ use Azuriom\Models\CurrencyTransaction;
+ use Azuriom\Models\User;
+ use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Str;
+ 
+ /**
+@@ -48,6 +49,9 @@ class ServerMovementRecorder
+ 
+         $users = $this->usersByUuid(array_unique(array_filter($uuids)));
+         $sync = app(CurrencyServerSync::class);
++        // Deltas only touch the site mirror for servers where the site is authoritative
++        // (queue on for this server). Otherwise movements stay display-only, as before.
++        $mirror = ServerOperationQueue::enabledFor($serverId);
+ 
+         foreach ($movements as $m) {
+             $id = (int) $m['id'];
+@@ -59,104 +63,90 @@ class ServerMovementRecorder
+                 : null;
+             $deltas = isset($m['deltas']) && is_array($m['deltas']) ? $m['deltas'] : null;
+ 
+-            $row = CurrencyServerMovement::query()->firstOrCreate(
+-                ['server_id' => $serverId, 'movement_id' => $id],
+-                [
+-                    'type' => Str::limit((string) $m['type'], 32, ''),
+-                    'amount' => max(0, (int) $m['amount']),
+-                    'from_uuid' => $from,
+-                    'from_name' => isset($m['from_name']) ? Str::limit((string) $m['from_name'], 64, '') : null,
+-                    'from_user_id' => $from !== null ? ($users[$from] ?? null) : null,
+-                    'to_uuid' => $to,
+-                    'to_name' => isset($m['to_name']) ? Str::limit((string) $m['to_name'], 64, '') : null,
+-                    'to_user_id' => $to !== null ? ($users[$to] ?? null) : null,
+-                    'note' => isset($m['note']) ? Str::limit((string) $m['note'], 180) : null,
+-                    'site_op_id' => $siteOpId,
+-                    'deltas' => $deltas,
+-                    'occurred_at' => Carbon::createFromTimestampMs((int) $m['timestamp']),
+-                ]
+-            );
+-
+-            if (! $row->wasRecentlyCreated) {
+-                $duplicates++;
+-
+-                continue;
+-            }
+-
+-            $stored++;
+-
+-            if ($siteOpId !== null || $deltas === null) {
+-                if ($deltas !== null) {
+-                    $this->runDriftFromDeltas($sync, $users, $serverId, $deltas);
++            $drift = [];
++
++            $created = DB::transaction(function () use ($serverId, $id, $m, $from, $to, $users, $siteOpId, $deltas, $mirror, &$drift) {
++                $row = CurrencyServerMovement::query()->firstOrCreate(
++                    ['server_id' => $serverId, 'movement_id' => $id],
++                    [
++                        'type' => Str::limit((string) $m['type'], 32, ''),
++                        'amount' => max(0, (int) $m['amount']),
++                        'from_uuid' => $from,
++                        'from_name' => isset($m['from_name']) ? Str::limit((string) $m['from_name'], 64, '') : null,
++                        'from_user_id' => $from !== null ? ($users[$from] ?? null) : null,
++                        'to_uuid' => $to,
++                        'to_name' => isset($m['to_name']) ? Str::limit((string) $m['to_name'], 64, '') : null,
++                        'to_user_id' => $to !== null ? ($users[$to] ?? null) : null,
++                        'note' => isset($m['note']) ? Str::limit((string) $m['note'], 180) : null,
++                        'site_op_id' => $siteOpId,
++                        'deltas' => $deltas,
++                        'occurred_at' => Carbon::createFromTimestampMs((int) $m['timestamp']),
++                    ]
++                );
++
++                if (! $row->wasRecentlyCreated) {
++                    return false;
+                 }
+ 
+-                continue;
+-            }
++                if (! $mirror || $deltas === null) {
++                    return true;
++                }
+ 
+-            foreach ($deltas as $entry) {
+-                $uuid = $this->normalizeUuid((string) ($entry['uuid'] ?? ''));
++                foreach ($deltas as $entry) {
++                    $uuid = $this->normalizeUuid((string) ($entry['uuid'] ?? ''));
+ 
+-                if ($uuid === null || ! isset($users[$uuid])) {
+-                    continue;
+-                }
++                    if ($uuid === null || ! isset($users[$uuid])) {
++                        continue;
++                    }
+ 
+-                $user = User::query()->find($users[$uuid]);
++                    $user = User::query()->find($users[$uuid]);
+ 
+-                if ($user === null) {
+-                    continue;
+-                }
++                    if ($user === null) {
++                        continue;
++                    }
+ 
+-                $delta = (int) ($entry['delta'] ?? 0);
++                    $delta = (int) ($entry['delta'] ?? 0);
++
++                    if ($siteOpId === null && $delta !== 0) {
++                        $this->ledger->adjustServerBalance(
++                            $user,
++                            $serverId,
++                            $delta,
++                            CurrencyTransaction::TYPE_SERVER_SYNC,
++                            [
++                                'movement_id' => $id,
++                                'uuid' => $uuid,
++                            ],
++                            'mv:'.$serverId.':'.$id.':'.$uuid,
++                            true,
++                        );
++                    }
+ 
+-                if ($delta !== 0) {
+-                    $this->ledger->adjustServerBalance(
++                    $drift[] = [
+                         $user,
+-                        $serverId,
+-                        $delta,
+-                        CurrencyTransaction::TYPE_SERVER_SYNC,
+-                        [
+-                            'movement_id' => $id,
+-                            'uuid' => $uuid,
+-                        ],
+-                        'mv:'.$serverId.':'.$id.':'.$uuid,
+-                        true,
+-                    );
++                        array_key_exists('balance_after', $entry) && $entry['balance_after'] !== null
++                            ? (int) $entry['balance_after']
++                            : null,
++                    ];
+                 }
+ 
+-                $balanceAfter = array_key_exists('balance_after', $entry) && $entry['balance_after'] !== null
+-                    ? (int) $entry['balance_after']
+-                    : null;
+-                $sync->maybeReconcileDrift($user, $serverId, $balanceAfter);
+-            }
+-        }
+-
+-        return ['stored' => $stored, 'duplicates' => $duplicates, 'accepted_up_to' => $maxId];
+-    }
++                return true;
++            });
+ 
+-    /**
+-     * @param  array<string, int>  $users
+-     * @param  array<int, array<string, mixed>>  $deltas
+-     */
+-    private function runDriftFromDeltas(CurrencyServerSync $sync, array $users, int $serverId, array $deltas): void
+-    {
+-        foreach ($deltas as $entry) {
+-            $uuid = $this->normalizeUuid((string) ($entry['uuid'] ?? ''));
++            if (! $created) {
++                $duplicates++;
+ 
+-            if ($uuid === null || ! isset($users[$uuid])) {
+                 continue;
+             }
+ 
+-            $user = User::query()->find($users[$uuid]);
++            $stored++;
+ 
+-            if ($user === null) {
+-                continue;
++            foreach ($drift as [$user, $balanceAfter]) {
++                $sync->maybeReconcileDrift($user, $serverId, $balanceAfter);
+             }
+-
+-            $balanceAfter = array_key_exists('balance_after', $entry) && $entry['balance_after'] !== null
+-                ? (int) $entry['balance_after']
+-                : null;
+-            $sync->maybeReconcileDrift($user, $serverId, $balanceAfter);
+         }
++
++        return ['stored' => $stored, 'duplicates' => $duplicates, 'accepted_up_to' => $maxId];
+     }
+ 
+     private function normalizeUuid(string $value): ?string
+diff --git a/resources/views/admin/users/edit.blade.php b/resources/views/admin/users/edit.blade.php
+index 5574822..6aaf5fb 100755
+--- a/resources/views/admin/users/edit.blade.php
++++ b/resources/views/admin/users/edit.blade.php
+@@ -229,12 +229,12 @@
+                             @if($servers->isEmpty() && $balancesByServerId->isEmpty())
+                                 <p class="text-muted mb-1">{{ trans('admin.users.server_balances.empty') }}</p>
+                             @else
+-                                <div class="table-responsive">
++                                <div class="table-responsive" style="max-height: 32rem; overflow-y: auto;">
+                                     <table class="table table-sm table-bordered mb-1">
+-                                        <thead>
++                                        <thead class="sticky-top" style="background: var(--bs-body-bg);">
+                                         <tr>
+                                             <th>{{ trans('admin.users.server_balances.server') }}</th>
+-                                            <th>{{ trans('admin.users.server_balances.balance') }}</th>
++                                            <th style="min-width: 12rem">{{ trans('admin.users.server_balances.balance') }}</th>
+                                         </tr>
+                                         </thead>
+                                         <tbody>
+diff --git a/tests/Feature/CurrencyServerSyncTest.php b/tests/Feature/CurrencyServerSyncTest.php
+index 8688c68..08e360f 100644
+--- a/tests/Feature/CurrencyServerSyncTest.php
++++ b/tests/Feature/CurrencyServerSyncTest.php
+@@ -6,6 +6,7 @@ use Azuriom\Models\CurrencyServerMovement;
+ use Azuriom\Models\CurrencyServerOperation as Op;
+ use Azuriom\Models\CurrencyTransaction;
+ use Azuriom\Models\Server;
++use Azuriom\Models\Setting;
+ use Azuriom\Models\User;
+ use Azuriom\Models\UserServerBalance;
+ use Azuriom\Services\Currency\CurrencyLedger;
+@@ -53,8 +54,10 @@ class CurrencyServerSyncTest extends TestCase
+             'data' => [],
+         ]);
+ 
+-        DB::table('settings')->updateOrInsert(['name' => 'currency.server_queue_enabled'], ['value' => '1']);
+-        DB::table('settings')->updateOrInsert(['name' => 'currency.server_queue_servers'], ['value' => (string) $this->server->id]);
++        Setting::updateSettings([
++            'currency.server_queue_enabled' => '1',
++            'currency.server_queue_servers' => (string) $this->server->id,
++        ]);
+ 
+         $this->ledger = app(CurrencyLedger::class);
+         $this->sync = app(CurrencyServerSync::class);
+@@ -203,7 +206,7 @@ class CurrencyServerSyncTest extends TestCase
+ 
+     public function test_queue_disabled_uses_direct_adjust(): void
+     {
+-        DB::table('settings')->where('name', 'currency.server_queue_enabled')->update(['value' => '0']);
++        Setting::updateSettings('currency.server_queue_enabled', '0');
+         $tx = $this->sync->adjust($this->user, $this->server, 7, 'legacy', ['source' => 'admin_user_edit']);
+         $this->assertInstanceOf(CurrencyTransaction::class, $tx);
+         $this->assertEquals(107, $this->ledger->serverBalance($this->user, $this->server->id));
+@@ -215,4 +218,16 @@ class CurrencyServerSyncTest extends TestCase
+         $this->expectException(InvalidArgumentException::class);
+         $this->sync->adjust($this->user, $this->server, 0, '', ['source' => 'admin_user_edit']);
+     }
++
++    public function test_movement_deltas_ignored_when_queue_off_for_server(): void
++    {
++        Setting::updateSettings('currency.server_queue_servers', '99999');
++        $before = $this->ledger->serverBalance($this->user, $this->server->id);
++        app(ServerMovementRecorder::class)->record($this->server->id, [[
++            'id' => 50, 'timestamp' => 1791400000000, 'type' => 'trader_buy', 'amount' => 10,
++            'from_id' => $this->user->game_id, 'from_name' => 'Nick', 'to_id' => null, 'to_name' => 'trader', 'note' => null,
++            'deltas' => [['uuid' => $this->user->game_id, 'delta' => -10, 'balance_after' => 90]],
++        ]]);
++        $this->assertEquals($before, $this->ledger->serverBalance($this->user, $this->server->id));
++    }
+ }

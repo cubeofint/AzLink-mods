@@ -43,6 +43,21 @@ public final class CoinOperationsBridge {
     }
 
     /**
+     * Ack with the in-game wallet after handling the op. cointcore calls this reflectively and
+     * falls back to {@link #ack(String, String, String)} on older AzLink builds.
+     */
+    public static CompletableFuture<String> ackWithBalance(String operationId, String status, String error,
+                                                           long balanceAfter) {
+        AzLinkPlugin current = plugin;
+        if (!isAvailable()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("AzLink not configured"));
+        }
+        return current.getHttpClient()
+                .ackCoinOperation(operationId, status, error, balanceAfter)
+                .thenApply(Object::toString);
+    }
+
+    /**
      * Send a batch of server-wallet movements (JSON {@code {"movements":[...]}}). Idempotent on the site
      * by (server, movement id). Returns the site JSON ({@code accepted_up_to}, {@code stored}, ...).
      */
