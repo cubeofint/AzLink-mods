@@ -41,7 +41,7 @@ the site copy. No absolute overwrite in either direction. `adjust` never touches
 | --- | --- | --- |
 | Admin user edit set-balance | `CurrencyServerSync::adjust` (signed delta + reason) | `adjustServerBalance` as before |
 | Admin `transferCoins` | `ServerOperationQueue::enqueue` to_server/from_server | `withdrawToServer` / `depositFromServer` |
-| Profile `transferCoins` | same enqueue | same ledger methods |
+| Profile `transferCoins` | **refused** (0004): validation error «используйте /pay в игре», form lists only other servers | same ledger methods |
 | Shop / quark exchange | **not in this snapshot** — call `CurrencyServerSync::adjust` (`source=shop` / `quark_exchange`) when those land | — |
 | `CurrencyLedger::adjustServerBalance` itself | unchanged (used by the sync/ack path) | unchanged |
 
@@ -53,29 +53,50 @@ the site copy. No absolute overwrite in either direction. `adjust` never touches
 
 Existing behaviour is unchanged while the global queue flag is off.
 
+## Patch order
+
+1. `0001` — per-server flag, `CurrencyServerSync`, ack `balance_after`, movements `deltas`/`site_op_id`, migration.
+2. `0002` — admin adjust UI, admin/profile transfers via queue, `currency:server-sync-probe`, tests.
+3. `0003` — fixes on top of 0001/0002:
+   - movement deltas change the site mirror **only** for servers where `enabledFor()` is true
+     (otherwise movements stay display-only, as before); row + ledger writes in one transaction;
+   - drift check serialized per user (row lock) so concurrent ack/movement requests cannot
+     enqueue two reconcile ops; probe command skips users with a pending op;
+   - admin server-balance table keeps its scroll/sticky header;
+   - tests set flags via `Setting::updateSettings` (Azuriom reads settings from cache).
+4. `0004` — profile site↔server transfer (`profile.transfer-coins`) is refused for servers where
+   `enabledFor()` is true (players use `/pay` in game); the coints profile form lists only the other
+   servers and shows a hint. Other servers and queue-off behaviour are unchanged.
+   Adds `messages.profile.coins_transfer.disabled_*` and `ProfileCoinsTransferQueueTest`.
+
 ## Apply (after DB dump + file backup, with confirmation)
 
 ```
 cd /var/www/main-site
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0001-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0002-*.patch
+git apply ../AzLink-mods/site-patches/gluon-server-adjust/0003-*.patch
+git apply ../AzLink-mods/site-patches/gluon-server-adjust/0004-*.patch
 php artisan migrate --force
 php artisan currency:verify-ledger
 # enable only when ready, e.g. server 9 only:
+# use Setting::updateSettings (clears the settings cache), allow-list FIRST:
+# setting currency.server_queue_servers = 9        # empty = ALL mc-azlink servers
 # setting currency.server_queue_enabled = 1
-# setting currency.server_queue_servers = 9
-# setting currency.server_movements_enabled = 1   # already used for movements
+# setting currency.server_movements_enabled = 1    # already used for movements
 ```
 
 ## Tests
 
 ```
 cd /var/www/main-site
-php artisan test --filter=CurrencyServerSyncTest
+php vendor/bin/phpunit tests/Feature/CurrencyServerSyncTest.php
+php vendor/bin/phpunit tests/Feature/ProfileCoinsTransferQueueTest.php
 ```
 
-Needs Azuriom’s PHPUnit + sqlite/MySQL and a `User` factory (or adapt `setUp`). This
-repo cannot boot Azuriom; the test file is shipped inside patch `0002`.
+Run the files directly (`--filter` loads every test file, and an unrelated existing test has a
+fatal signature error). Verified on a copy of the production tree: 13 + 5 tests green on sqlite
+and MariaDB. The coints-theme render test skips when theme assets are not published.
 
 ## Rollback
 
@@ -86,7 +107,8 @@ php artisan migrate:rollback --step=1
 ```
 
 (`step=1` drops `currency.server_queue_servers` and the movement `deltas`/`site_op_id`
-columns). Flags can be set back to `0` / `''` without rollback.
+columns). Also delete the four files the series adds (`CurrencyServerSync.php`,
+`CurrencyServerSyncProbeCommand.php`, the migration, the two tests) after the rollback. Flags can be set back to `0` / `''` without rollback.
 
 ## JSON contract
 
