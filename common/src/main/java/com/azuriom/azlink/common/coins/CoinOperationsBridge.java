@@ -41,4 +41,20 @@ public final class CoinOperationsBridge {
         }
         return current.getHttpClient().ackCoinOperation(operationId, status, error).thenApply(Object::toString);
     }
+
+    /**
+     * Send a batch of server-wallet movements (JSON {@code {"movements":[...]}}). Idempotent on the site
+     * by (server, movement id). Returns the site JSON ({@code accepted_up_to}, {@code stored}, ...).
+     */
+    public static CompletableFuture<String> postMovements(String json) {
+        AzLinkPlugin current = plugin;
+        if (!isAvailable()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("AzLink not configured"));
+        }
+        com.google.gson.JsonObject body = AzLinkPlugin.getGson().fromJson(json, com.google.gson.JsonObject.class);
+        return current.getHttpClient()
+                .request(com.azuriom.azlink.common.http.client.HttpClient.RequestMethod.POST, "/azlink/coins/movements", body,
+                        com.google.gson.JsonObject.class)
+                .thenApply(Object::toString);
+    }
 }

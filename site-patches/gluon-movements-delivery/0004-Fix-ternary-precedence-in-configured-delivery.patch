@@ -1,0 +1,25 @@
+From ad33ee25b7a4b9be2bc74e900e838c06243faac6 Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 12:25:54 +0500
+Subject: [PATCH 4/4] Fix ternary precedence in configured delivery
+
+---
+ plugins/shop/src/Services/ConfiguredDeliveryService.php | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/plugins/shop/src/Services/ConfiguredDeliveryService.php b/plugins/shop/src/Services/ConfiguredDeliveryService.php
+index e9d968c..6417e99 100644
+--- a/plugins/shop/src/Services/ConfiguredDeliveryService.php
++++ b/plugins/shop/src/Services/ConfiguredDeliveryService.php
+@@ -197,7 +197,7 @@ class ConfiguredDeliveryService
+     {
+         $key = $purchase->serverConfiguration?->entitlement_key;
+ 
+-        return $key !== null && $key !== '' ? $key : Str::slug($purchase->privilege_name_snapshot) ?: 'privilege-'.$purchase->privilege_id;
++        return $key !== null && $key !== '' ? $key : (Str::slug((string) $purchase->privilege_name_snapshot) ?: 'privilege-'.$purchase->privilege_id);
+     }
+ 
+     private function kitKey(ConfiguredPurchaseKit $line): string
+-- 
+2.47.3
+
