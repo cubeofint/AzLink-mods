@@ -1,61 +1,51 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b29fefbfbfcf56eb3dc08cfbef18b50a5b3518a5 Mon Sep 17 00:00:00 2001
 From: mawleesys <alsoalberdo@gmail.com>
-Date: Wed, 7 Oct 2026 12:40:00 +0500
+Date: Wed, 7 Oct 2026 16:25:00 +0500
 Subject: [PATCH 5/5] Shop poll: accept plain capability keys only
 
-supported_capabilities.* must match ^[a-z][a-z0-9._-]{0,63}$
-(fly, claim_chunks, cointcore.bonus_claim_chunks). Reject "*", "meta:…".
+Tighten the existing MinecraftOperationPollRequest (used by
+MinecraftOperationController::poll): supported_capabilities.* must match
+^[a-z][a-z0-9._-]{0,63}$ (fly, claim_chunks, cointcore.bonus_claim_chunks).
+Rejects "*" and "meta:...".
 ---
- .../Requests/AzLink/PollOperationsRequest.php | 48 +++++++++++++++++++
- 1 file changed, 48 insertions(+)
- create mode 100644 plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php
+ .../Requests/MinecraftOperationPollRequest.php   | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
 
-diff --git a/plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php b/plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php
-new file mode 100644
-index 0000000..c0ff001
---- /dev/null
-+++ b/plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php
-@@ -0,0 +1,48 @@
-+<?php
-+
-+namespace Azuriom\Plugin\Shop\Http\Requests\AzLink;
-+
-+use Illuminate\Foundation\Http\FormRequest;
-+
+diff --git a/plugins/shop/src/Requests/MinecraftOperationPollRequest.php b/plugins/shop/src/Requests/MinecraftOperationPollRequest.php
+index 58b49ba..3e86e0b 100644
+--- a/plugins/shop/src/Requests/MinecraftOperationPollRequest.php
++++ b/plugins/shop/src/Requests/MinecraftOperationPollRequest.php
+@@ -6,6 +6,13 @@ use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
+ use Illuminate\Foundation\Http\FormRequest;
+ use Illuminate\Validation\Rule;
+ 
 +/**
-+ * POST /api/shop/azlink/v1/operations/poll (and aliased /api/azlink/v1/operations/poll).
++ * POST /api/azlink/v1/operations/poll (MinecraftOperationController::poll).
 + *
 + * Wire capability keys are shop definitions, not LuckPerms nodes.
 + * Valid: fly, claim_chunks, cointcore.bonus_claim_chunks
-+ * Invalid: *, meta:cointcore.bonus_claim_chunks, azlink.capability.fly
++ * Invalid: *, meta:cointcore.bonus_claim_chunks
 + */
-+class PollOperationsRequest extends FormRequest
-+{
-+    public function authorize(): bool
-+    {
-+        return true;
-+    }
-+
-+    public function rules(): array
-+    {
-+        return [
-+            'protocol_version' => ['required', 'integer', 'min:1'],
-+            'executor_version' => ['required', 'string', 'max:64'],
-+            'supported_operation_types' => ['required', 'array', 'min:1'],
-+            'supported_operation_types.*' => ['required', 'string', 'in:privilege_reconcile,privilege_revoke,kit_redeem'],
-+            'supported_capabilities' => ['present', 'array'],
+ class MinecraftOperationPollRequest extends FormRequest
+ {
+     public function authorize(): bool { return true; }
+@@ -18,8 +25,15 @@ class MinecraftOperationPollRequest extends FormRequest
+             'supported_operation_types' => ['required', 'array', 'min:1'],
+             'supported_operation_types.*' => ['required', Rule::enum(MinecraftOperationType::class)],
+             'supported_capabilities' => ['present', 'array'],
+-            'supported_capabilities.*' => ['string', 'max:64', 'regex:/^[a-z0-9][a-z0-9._-]*$/'],
 +            'supported_capabilities.*' => ['required', 'string', 'regex:/^[a-z][a-z0-9._-]{0,63}$/'],
-+            'max_batch' => ['required', 'integer', 'min:1', 'max:100'],
-+        ];
-+    }
+             'max_batch' => ['sometimes', 'integer', 'min:1', 'max:50'],
+         ];
+     }
 +
 +    public function messages(): array
 +    {
 +        return [
-+            'supported_capabilities.*.regex' => 'supported_capabilities must be plain shop keys (fly, claim_chunks), not * or meta:…',
++            'supported_capabilities.*.regex' => 'supported_capabilities must be plain shop keys (fly, claim_chunks), not * or meta:...',
 +        ];
 +    }
-+}
-+
+ }
 -- 
 2.47.3
+

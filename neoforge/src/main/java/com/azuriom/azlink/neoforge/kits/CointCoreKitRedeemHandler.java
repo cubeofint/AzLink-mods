@@ -15,6 +15,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
@@ -24,6 +26,12 @@ import java.util.function.Supplier;
  */
 public final class CointCoreKitRedeemHandler implements OperationHandler {
     private static final String CREDIT_SERVICE = "com.mawlee.cointcore.kit.KitCreditService";
+
+    private static final int NEW = 0;
+    private static final int STARTED = 1;
+    private static final int ABANDONED = 2;
+    private static final long QUEUE_TIMEOUT_SECONDS = 15;
+    private static final long RUN_TIMEOUT_SECONDS = 120;
 
     private final Supplier<MinecraftServer> server;
 
@@ -53,8 +61,17 @@ public final class CointCoreKitRedeemHandler implements OperationHandler {
             return ExecutionResult.of(OperationResultCode.RETRYABLE_FAILED, "server not ready");
         }
 
+        // NEW -> STARTED (main thread runs the credit) or NEW -> ABANDONED (we gave up waiting).
+        // Whoever wins the CAS decides: an abandoned task never touches credits, so a timeout
+        // before the task started is a clean retryable failure, not an uncertain one.
+        AtomicInteger state = new AtomicInteger(NEW);
         CompletableFuture<ExecutionResult> future = new CompletableFuture<>();
         mc.execute(() -> {
+            if (!state.compareAndSet(NEW, STARTED)) {
+                logger.warn("[SemanticExecutor] KIT_REDEEM skipped (abandoned after timeout) operation_id="
+                        + operation.getOperationId());
+                return;
+            }
             try {
                 Optional<String> kitName = findKit(key);
                 if (kitName.isEmpty()) {
@@ -76,10 +93,21 @@ public final class CointCoreKitRedeemHandler implements OperationHandler {
         });
 
         try {
-            return future.get(15, TimeUnit.SECONDS);
+            return future.get(QUEUE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            if (state.compareAndSet(NEW, ABANDONED)) {
+                // Main thread never picked the task up (e.g. server still starting): nothing written.
+                return ExecutionResult.of(OperationResultCode.RETRYABLE_FAILED, "server thread busy, kit not credited");
+            }
+            // Task is running on the main thread: wait for its real outcome.
+            try {
+                return future.get(RUN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (Exception e2) {
+                throw new IllegalStateException("kit credit result unknown: " + e2, e2);
+            }
         } catch (Exception e) {
             // Unknown whether the credit was written: never report retryable.
-            throw new IllegalStateException("kit credit result unknown: " + e.getMessage(), e);
+            throw new IllegalStateException("kit credit result unknown: " + e, e);
         }
     }
 

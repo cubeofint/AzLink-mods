@@ -32,9 +32,10 @@ empty list. Laravel then answered **422** «supported_capabilities.0 имеет 
 ^[a-z][a-z0-9._-]{0,63}$
 ```
 
-Patch `0005` adds `PollOperationsRequest` with that rule. If the class already exists
-on the server, replace only the `supported_capabilities.*` regex (do not accept `*`
-or `:`).
+Patch `0005` tightens the existing `plugins/shop/src/Requests/MinecraftOperationPollRequest.php`
+(the request class actually used by `MinecraftOperationController::poll`) to that rule.
+It creates no new files. If an older 0005 left `plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php`
+on the server, delete it: nothing references it.
 
 ## Apply
 
@@ -48,8 +49,6 @@ php artisan migrate --force
 # setting shop.configured_delivery.enabled = 1
 ```
 
-If `PollOperationsRequest` already exists, `git apply` of `0005` may fail on that
-file: copy the `supported_capabilities.*` rule from the patch by hand.
 
 ## Rollback
 
