@@ -21,6 +21,8 @@ public final class PrivilegePlan {
 
     public static final String ENTITLEMENT_CONTEXT = "azlink-entitlement";
     public static final String CAPABILITY_PREFIX = "azlink.capability.";
+    /** Entries in {@link #getPermissions()} with this prefix are meta nodes {@code key=value}. */
+    public static final String META_PREFIX = "meta:";
 
     private final String entitlementId;
     private final String groupName;
@@ -156,8 +158,17 @@ public final class PrivilegePlan {
                 }
                 continue;
             }
+            if (value.getAsJsonPrimitive().isNumber()) {
+                // Numeric capability (e.g. bonus chunks) -> LuckPerms meta key=value.
+                permissions.add(META_PREFIX + key + "=" + value.getAsJsonPrimitive().getAsBigDecimal().stripTrailingZeros().toPlainString());
+                continue;
+            }
             if (value.getAsJsonPrimitive().isString()) {
                 String raw = value.getAsString().trim();
+                if (raw.matches("-?\\d{1,12}(\\.\\d{1,4})?")) {
+                    permissions.add(META_PREFIX + key + "=" + new java.math.BigDecimal(raw).stripTrailingZeros().toPlainString());
+                    continue;
+                }
                 if (raw.isEmpty() || raw.length() > 200 || raw.indexOf(' ') >= 0) {
                     return "invalid permission node for capability: " + key;
                 }

@@ -80,7 +80,20 @@ public final class AzLinkNeoForgeMod implements AzLinkPlatform {
                 this.plugin,
                 uuid -> this.server == null ? null : this.server.getPlayerList().getPlayer(uuid)
         ));
+        installSemanticBackends();
         this.plugin.init();
+    }
+
+    private void installSemanticBackends() {
+        if (net.neoforged.fml.ModList.get().isLoaded("luckperms")) {
+            this.plugin.installLuckPerms(new com.azuriom.azlink.neoforge.luckperms.LuckPermsPrivilegeBackend());
+        }
+        if (net.neoforged.fml.ModList.get().isLoaded("ftbessentials")
+                && net.neoforged.fml.ModList.get().isLoaded("cointcore")
+                && com.azuriom.azlink.neoforge.kits.CointCoreKitRedeemHandler.isAvailable()) {
+            this.plugin.installKitRedeemHandler(
+                    new com.azuriom.azlink.neoforge.kits.CointCoreKitRedeemHandler(() -> this.server));
+        }
     }
 
     @SubscribeEvent

@@ -65,6 +65,13 @@ public class SemanticExecutor {
         this.handlers.put(OperationType.KIT_REDEEM, new MockKitRedeemHandler());
     }
 
+    /** Replace the mock kit handler with a real platform implementation. */
+    public void useKitRedeemHandler(OperationHandler handler) {
+        if (handler != null) {
+            this.handlers.put(OperationType.KIT_REDEEM, handler);
+        }
+    }
+
     public ExecutorConfig getConfig() {
         return this.config;
     }

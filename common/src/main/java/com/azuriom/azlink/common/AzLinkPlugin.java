@@ -270,6 +270,10 @@ public class AzLinkPlugin {
     /**
      * Call before {@link #init()} when LuckPerms is installed.
      */
+    public void installKitRedeemHandler(com.azuriom.azlink.common.executor.handlers.OperationHandler handler) {
+        this.semanticExecutorService.useKitRedeemHandler(handler);
+    }
+
     public void installLuckPerms(PrivilegeBackend backend) {
         this.semanticExecutorService.useLuckPerms(backend);
     }

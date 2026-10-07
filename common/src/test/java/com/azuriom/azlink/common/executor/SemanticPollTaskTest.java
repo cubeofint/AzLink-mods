@@ -75,6 +75,9 @@ class SemanticPollTaskTest {
         assertTrue(this.client.acks.get(0).getExecutorVersion() != null
                 && !this.client.acks.get(0).getExecutorVersion().isEmpty());
         assertTrue(this.client.lastPollRequest.getSupportedOperationTypes().contains("kit_redeem"));
+        for (String key : this.client.lastPollRequest.getSupportedCapabilities()) {
+            assertTrue(CapabilityKeys.isWireSafe(key), key);
+        }
     }
 
     @Test

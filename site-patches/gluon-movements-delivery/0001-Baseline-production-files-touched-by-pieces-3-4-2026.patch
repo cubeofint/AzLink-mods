@@ -1,0 +1,2176 @@
+From 0e739e0b2825a90197db43a83d0063390d269b13 Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 12:11:27 +0500
+Subject: [PATCH 1/4] Baseline: production files touched by pieces 3-4
+ (2026-10-07)
+
+---
+ plugins/shop/routes/admin.php                 | 104 +++
+ .../src/Providers/ShopServiceProvider.php     | 359 ++++++++
+ .../Services/EntitlementLifecycleService.php  | 318 +++++++
+ .../Services/MinecraftOperationDispatcher.php | 198 ++++
+ .../coints/views/profile/index.blade.php      | 855 ++++++++++++++++++
+ .../currency-transactions/index.blade.php     | 104 +++
+ routes/admin.php                              | 170 ++++
+ 7 files changed, 2108 insertions(+)
+ create mode 100755 plugins/shop/routes/admin.php
+ create mode 100755 plugins/shop/src/Providers/ShopServiceProvider.php
+ create mode 100644 plugins/shop/src/Services/EntitlementLifecycleService.php
+ create mode 100644 plugins/shop/src/Services/MinecraftOperationDispatcher.php
+ create mode 100755 resources/themes/coints/views/profile/index.blade.php
+ create mode 100644 resources/views/admin/currency-transactions/index.blade.php
+ create mode 100755 routes/admin.php
+
+diff --git a/plugins/shop/routes/admin.php b/plugins/shop/routes/admin.php
+new file mode 100755
+index 0000000..6ea2f1e
+--- /dev/null
++++ b/plugins/shop/routes/admin.php
+@@ -0,0 +1,104 @@
++<?php
++
++use Azuriom\Plugin\Shop\Controllers\Admin\CategoryController;
++use Azuriom\Plugin\Shop\Controllers\Admin\CapabilityDefinitionController;
++use Azuriom\Plugin\Shop\Controllers\Admin\CouponController;
++use Azuriom\Plugin\Shop\Controllers\Admin\DiscountController;
++use Azuriom\Plugin\Shop\Controllers\Admin\GatewayController;
++use Azuriom\Plugin\Shop\Controllers\Admin\GiftcardController;
++use Azuriom\Plugin\Shop\Controllers\Admin\OfferController;
++use Azuriom\Plugin\Shop\Controllers\Admin\PrivilegeAddonController;
++use Azuriom\Plugin\Shop\Controllers\Admin\PrivilegeController;
++use Azuriom\Plugin\Shop\Controllers\Admin\KitController;
++use Azuriom\Plugin\Shop\Controllers\Admin\KitManifestReviewController;
++use Azuriom\Plugin\Shop\Controllers\Admin\PackageController;
++use Azuriom\Plugin\Shop\Controllers\Admin\PaymentController;
++use Azuriom\Plugin\Shop\Controllers\Admin\PurchaseController;
++use Azuriom\Plugin\Shop\Controllers\Admin\SettingController;
++use Azuriom\Plugin\Shop\Controllers\Admin\StatisticsController;
++use Azuriom\Plugin\Shop\Controllers\Admin\SubscriptionController;
++use Azuriom\Plugin\Shop\Controllers\Admin\UserPurchaseLimitResetController;
++use Azuriom\Plugin\Shop\Controllers\Admin\VariableController;
++use Illuminate\Support\Facades\Route;
++
++/*
++|--------------------------------------------------------------------------
++| Admin Routes
++|--------------------------------------------------------------------------
++|
++| Here is where you can register admin routes for your plugin. These
++| routes are loaded by the RouteServiceProvider within a group which
++| contains the "web" and "admin" middleware groups. Now create a great admin panel !
++|
++*/
++Route::middleware('can:shop.settings')->prefix('settings')->group(function () {
++    Route::get('/', [SettingController::class, 'show'])->name('settings');
++    Route::post('/', [SettingController::class, 'save'])->name('settings.save');
++});
++
++Route::middleware('can:shop.packages')->group(function () {
++    Route::resource('packages', PackageController::class)->except('show');
++    Route::resource('categories', CategoryController::class)->except(['index', 'show']);
++    Route::resource('variables', VariableController::class)->except('show');
++
++    Route::post('/packages/update-order', [PackageController::class, 'updateOrder'])->name('packages.update-order');
++    Route::post('/packages/{package}/duplicate',
++        [PackageController::class, 'duplicate'])->name('packages.duplicate');
++
++    Route::post('/users/{user}/purchase-limit-reset', [UserPurchaseLimitResetController::class, 'store'])
++        ->name('users.purchase-limit-reset');
++});
++
++Route::middleware('can:shop.privileges')->group(function () {
++    Route::resource('privileges', PrivilegeController::class)->except('show');
++    Route::post('/privileges/update-order', [PrivilegeController::class, 'updateOrder'])
++        ->name('privileges.update-order');
++});
++
++Route::middleware('can:shop.capabilities')->group(function () {
++    Route::resource('capabilities', CapabilityDefinitionController::class)->except('show');
++    Route::post('/capabilities/update-order', [CapabilityDefinitionController::class, 'updateOrder'])
++        ->name('capabilities.update-order');
++});
++
++Route::middleware('can:shop.kits')->group(function () {
++    Route::resource('kits', KitController::class)->except('show');
++    Route::post('/kits/update-order', [KitController::class, 'updateOrder'])->name('kits.update-order');
++    Route::post('/kits/item-icons', [KitController::class, 'storeItemIcon'])->name('kits.item-icons.store');
++    Route::post('/kits/{kit}/manifests/{manifest}/apply', [KitManifestReviewController::class, 'apply'])
++        ->name('kits.manifests.apply');
++    Route::post('/kits/{kit}/manifests/{manifest}/reject', [KitManifestReviewController::class, 'reject'])
++        ->name('kits.manifests.reject');
++});
++
++Route::middleware('can:shop.addons')->group(function () {
++    Route::resource('addons', PrivilegeAddonController::class)->except('show');
++    Route::post('/addons/update-order', [PrivilegeAddonController::class, 'updateOrder'])
++        ->name('addons.update-order');
++});
++
++Route::middleware('can:shop.payments')->group(function () {
++    Route::resource('payments', PaymentController::class)->only(['index', 'show', 'create', 'store']);
++    Route::resource('purchases', PurchaseController::class)->only('index');
++    Route::resource('subscriptions', SubscriptionController::class)->only(['index', 'show', 'destroy']);
++
++    Route::prefix('stats')->group(function () {
++        Route::get('/', [StatisticsController::class, 'index'])->name('statistics');
++        Route::get('/packages/{package}', [StatisticsController::class, 'showPackage'])->name('statistics.package');
++    });
++});
++
++Route::middleware('can:shop.gateways')->group(function () {
++    Route::resource('gateways', GatewayController::class)->except(['show', 'create']);
++    Route::resource('offers', OfferController::class)->except('show');
++
++    Route::post('/gateways/positions', [GatewayController::class, 'updateOrder'])->name('gateways.positions');
++    Route::get('/gateways/create/{type}', [GatewayController::class, 'create'])->name('gateways.create');
++});
++
++Route::middleware('can:shop.promotions')->group(function () {
++    Route::resource('coupons', CouponController::class)->except('show');
++    Route::resource('giftcards', GiftcardController::class)->except('show');
++});
++
++Route::resource('discounts', DiscountController::class)->middleware('can:shop.giftcards')->except('show');
+diff --git a/plugins/shop/src/Providers/ShopServiceProvider.php b/plugins/shop/src/Providers/ShopServiceProvider.php
+new file mode 100755
+index 0000000..c06fbd3
+--- /dev/null
++++ b/plugins/shop/src/Providers/ShopServiceProvider.php
+@@ -0,0 +1,359 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Providers;
++
++use Azuriom\Extensions\Plugin\AdminUserEditComposer;
++use Azuriom\Extensions\Plugin\BasePluginServiceProvider;
++use Azuriom\Models\ActionLog;
++use Azuriom\Models\Permission;
++use Azuriom\Models\User;
++use Azuriom\Plugin\Shop\Commands\PaymentExpireCommand;
++use Azuriom\Plugin\Shop\Commands\SubscriptionRenewCommand;
++use Azuriom\Plugin\Shop\Middleware\EnsureShopCheckoutEnabled;
++use Azuriom\Plugin\Shop\Middleware\EnsureShopStaffPreview;
++use Azuriom\Plugin\Shop\Middleware\ShopAuthentification;
++use Azuriom\Plugin\Shop\Models\Gateway;
++use Azuriom\Plugin\Shop\Models\Giftcard;
++use Azuriom\Plugin\Shop\Models\CapabilityDefinition;
++use Azuriom\Plugin\Shop\Models\Kit;
++use Azuriom\Plugin\Shop\Models\MoneyTopup;
++use Azuriom\Plugin\Shop\Models\Offer;
++use Azuriom\Plugin\Shop\Models\Package;
++use Azuriom\Plugin\Shop\Models\Privilege;
++use Azuriom\Plugin\Shop\Models\PrivilegeAddon;
++use Azuriom\Plugin\Shop\Models\PrivilegeServerConfig;
++use Azuriom\Plugin\Shop\Observers\UserObserver;
++use Azuriom\Plugin\Shop\Payment\PaymentManager;
++use Azuriom\Plugin\Shop\Services\ShopCurrency;
++use Azuriom\Plugin\Shop\Services\TopupBonus;
++use Azuriom\Plugin\Shop\View\Composers\ShopAdminDashboardComposer;
++use Azuriom\Plugin\Shop\View\Composers\ShopAdminUserComposer;
++use Azuriom\Plugin\Shop\View\Composers\ShopViewComposer;
++use Illuminate\Console\Scheduling\Schedule;
++use Illuminate\Database\Eloquent\Relations\Relation;
++use Illuminate\Support\Facades\View;
++
++class ShopServiceProvider extends BasePluginServiceProvider
++{
++    /**
++     * The plugin's route middleware.
++     */
++    protected array $routeMiddleware = [
++        'shop.auth' => ShopAuthentification::class,
++        'shop.checkout' => EnsureShopCheckoutEnabled::class,
++        'shop.staff_preview' => EnsureShopStaffPreview::class,
++    ];
++
++    /**
++     * Register any plugin services.
++     */
++    public function register(): void
++    {
++        $this->registerMiddleware();
++
++        require_once __DIR__.'/../../vendor/autoload.php';
++
++        $this->mergeConfigFrom(__DIR__.'/../../config/kit_manifest.php', 'shop.kit_manifest');
++
++        $this->app->singleton(PaymentManager::class);
++        $this->app->singleton(ShopCurrency::class);
++        $this->app->singleton(TopupBonus::class);
++
++        Relation::morphMap([
++            'shop.offers' => Offer::class,
++            'shop.topups' => MoneyTopup::class,
++            'shop.packages' => Package::class,
++            'shop.privilege-configs' => PrivilegeServerConfig::class,
++        ]);
++    }
++
++    /**
++     * Bootstrap any plugin services.
++     */
++    public function boot(): void
++    {
++        $this->registerPolicies();
++
++        $this->loadViews();
++
++        $this->loadTranslations();
++
++        $this->loadMigrations();
++
++        $this->registerRouteDescriptions();
++
++        $this->registerUserNavigation();
++
++        $this->registerAdminNavigation();
++
++        $this->registerSchedule();
++
++        $this->commands([
++            PaymentExpireCommand::class,
++            SubscriptionRenewCommand::class,
++        ]);
++
++        View::composer('admin.dashboard', ShopAdminDashboardComposer::class);
++        View::composer('*', ShopViewComposer::class);
++
++        if (class_exists(AdminUserEditComposer::class)) {
++            View::composer('admin.users.edit', ShopAdminUserComposer::class);
++        }
++
++        Permission::registerPermissions([
++            'shop.settings' => 'shop::admin.permissions.settings',
++            'shop.packages' => 'shop::admin.permissions.packages',
++            'shop.gateways' => 'shop::admin.permissions.gateways',
++            'shop.promotions' => 'shop::admin.permissions.promotions',
++            'shop.giftcards' => 'shop::admin.permissions.giftcards',
++            'shop.payments' => 'shop::admin.permissions.payments',
++            'shop.privileges' => 'shop::admin.permissions.privileges',
++            'shop.kits' => 'shop::admin.permissions.kits',
++            'shop.addons' => 'shop::admin.permissions.addons',
++            'shop.capabilities' => 'shop::admin.permissions.capabilities',
++        ]);
++
++        ActionLog::registerLogModels([
++            Offer::class,
++            Package::class,
++            Gateway::class,
++            Privilege::class,
++            PrivilegeServerConfig::class,
++            Kit::class,
++            PrivilegeAddon::class,
++            CapabilityDefinition::class,
++        ], 'shop::admin.logs');
++
++        ActionLog::registerLogs([
++            'shop-giftcards.used' => [
++                'icon' => 'credit-card',
++                'color' => 'info',
++                'message' => 'shop::admin.logs.shop-giftcards.used',
++                'model' => Giftcard::class,
++            ],
++            'shop.settings.updated' => [
++                'icon' => 'cart',
++                'color' => 'info',
++                'message' => 'shop::admin.logs.settings',
++            ],
++            'shop.kits.manifest.received' => [
++                'icon' => 'box-arrow-in-down',
++                'color' => 'info',
++                'message' => 'shop::admin.logs.kits.manifest_received',
++                'model' => Kit::class,
++            ],
++            'shop.kits.manifest.applied' => [
++                'icon' => 'check2-circle',
++                'color' => 'success',
++                'message' => 'shop::admin.logs.kits.manifest_applied',
++                'model' => Kit::class,
++            ],
++            'shop.kits.manifest.rejected' => [
++                'icon' => 'x-circle',
++                'color' => 'warning',
++                'message' => 'shop::admin.logs.kits.manifest_rejected',
++                'model' => Kit::class,
++            ],
++            'shop.kits.manifest.retired' => [
++                'icon' => 'box-arrow-up',
++                'color' => 'secondary',
++                'message' => 'shop::admin.logs.kits.manifest_retired',
++                'model' => Kit::class,
++            ],
++        ]);
++
++        User::observe(UserObserver::class);
++    }
++
++    /**
++     * Define the application's command schedule.
++     */
++    protected function schedule(Schedule $schedule): void
++    {
++        $schedule->command('shop:subscriptions')->hourly();
++        $schedule->command('shop:payments')->hourly();
++    }
++
++    /**
++     * Returns the routes that should be able to be added to the navbar.
++     *
++     * @return array<string, string>
++     */
++    protected function routeDescriptions(): array
++    {
++        return [
++            'shop.home' => trans('shop::messages.title'),
++        ];
++    }
++
++    /**
++     * Return the admin navigations routes to register in the dashboard.
++     *
++     * @return array<string, array<string, string>>
++     */
++    protected function adminNavigation(): array
++    {
++        return [
++            'shop' => [
++                'name' => trans('shop::admin.nav.title'),
++                'type' => 'dropdown',
++                'icon' => 'bi bi-cart',
++                'route' => 'shop.admin.*',
++                'items' => [
++                    'shop.admin.settings' => [
++                        'name' => trans('shop::admin.nav.settings'),
++                        'permission' => 'shop.settings',
++                        'active' => ['shop.admin.settings', 'shop.admin.settings.*'],
++                    ],
++                    'shop.catalog.index' => [
++                        'name' => trans('shop::admin.nav.staff_preview'),
++                        'permission' => 'admin.access',
++                        'active' => 'shop.catalog.*',
++                    ],
++                    'shop.admin.packages.index' => [
++                        'name' => trans('shop::admin.nav.packages'),
++                        'permission' => 'shop.packages',
++                        'active' => ['shop.admin.packages.*', 'shop.admin.categories.*'],
++                    ],
++                    'catalog' => [
++                        'name' => trans('shop::admin.nav.groups.catalog'),
++                        'type' => 'dropdown',
++                        'icon' => 'bi bi-boxes',
++                        'route' => [
++                            'shop.admin.privileges.*',
++                            'shop.admin.kits.*',
++                            'shop.admin.addons.*',
++                            'shop.admin.capabilities.*',
++                        ],
++                        'items' => [
++                            'shop.admin.privileges.index' => [
++                                'name' => trans('shop::admin.nav.privileges'),
++                                'permission' => 'shop.privileges',
++                                'active' => 'shop.admin.privileges.*',
++                            ],
++                            'shop.admin.kits.index' => [
++                                'name' => trans('shop::admin.nav.kits'),
++                                'permission' => 'shop.kits',
++                                'active' => 'shop.admin.kits.*',
++                            ],
++                            'shop.admin.addons.index' => [
++                                'name' => trans('shop::admin.nav.addons'),
++                                'permission' => 'shop.addons',
++                                'active' => 'shop.admin.addons.*',
++                            ],
++                            'shop.admin.capabilities.index' => [
++                                'name' => trans('shop::admin.nav.capabilities'),
++                                'permission' => 'shop.capabilities',
++                                'active' => 'shop.admin.capabilities.*',
++                            ],
++                        ],
++                    ],
++                    'sales' => [
++                        'name' => trans('shop::admin.nav.groups.sales'),
++                        'type' => 'dropdown',
++                        'icon' => 'bi bi-receipt',
++                        'route' => [
++                            'shop.admin.payments.*',
++                            'shop.admin.purchases.*',
++                            'shop.admin.subscriptions.*',
++                        ],
++                        'items' => [
++                            'shop.admin.payments.index' => [
++                                'name' => trans('shop::admin.nav.payments'),
++                                'permission' => 'shop.payments',
++                                'active' => 'shop.admin.payments.*',
++                            ],
++                            'shop.admin.purchases.index' => [
++                                'name' => trans('shop::admin.nav.purchases'),
++                                'permission' => 'shop.payments',
++                                'active' => 'shop.admin.purchases.*',
++                            ],
++                            'shop.admin.subscriptions.index' => [
++                                'name' => trans('shop::admin.nav.subscriptions'),
++                                'permission' => 'shop.payments',
++                                'active' => 'shop.admin.subscriptions.*',
++                            ],
++                        ],
++                    ],
++                    'promo' => [
++                        'name' => trans('shop::admin.nav.groups.promo'),
++                        'type' => 'dropdown',
++                        'icon' => 'bi bi-tag',
++                        'route' => [
++                            'shop.admin.offers.*',
++                            'shop.admin.discounts.*',
++                            'shop.admin.coupons.*',
++                            'shop.admin.giftcards.*',
++                        ],
++                        'items' => [
++                            'shop.admin.offers.index' => [
++                                'name' => trans('shop::admin.nav.offers'),
++                                'permission' => 'shop.gateways',
++                                'active' => 'shop.admin.offers.*',
++                            ],
++                            'shop.admin.discounts.index' => [
++                                'name' => trans('shop::admin.nav.discounts'),
++                                'permission' => 'shop.promotions',
++                                'active' => 'shop.admin.discounts.*',
++                            ],
++                            'shop.admin.coupons.index' => [
++                                'name' => trans('shop::admin.nav.coupons'),
++                                'permission' => 'shop.promotions',
++                                'active' => 'shop.admin.coupons.*',
++                            ],
++                            'shop.admin.giftcards.index' => [
++                                'name' => trans('shop::admin.nav.giftcards'),
++                                'permission' => 'shop.giftcards',
++                                'active' => 'shop.admin.giftcards.*',
++                            ],
++                        ],
++                    ],
++                    'system' => [
++                        'name' => trans('shop::admin.nav.groups.system'),
++                        'type' => 'dropdown',
++                        'icon' => 'bi bi-gear',
++                        'route' => [
++                            'shop.admin.gateways.*',
++                            'shop.admin.variables.*',
++                            'shop.admin.statistics',
++                            'shop.admin.statistics.*',
++                        ],
++                        'items' => [
++                            'shop.admin.gateways.index' => [
++                                'name' => trans('shop::admin.nav.gateways'),
++                                'permission' => 'shop.gateways',
++                                'active' => 'shop.admin.gateways.*',
++                            ],
++                            'shop.admin.variables.index' => [
++                                'name' => trans('shop::admin.nav.variables'),
++                                'permission' => 'shop.packages',
++                                'active' => 'shop.admin.variables.*',
++                            ],
++                            'shop.admin.statistics' => [
++                                'name' => trans('shop::admin.nav.statistics'),
++                                'permission' => 'shop.payments',
++                                'active' => ['shop.admin.statistics', 'shop.admin.statistics.*'],
++                            ],
++                        ],
++                    ],
++                ],
++            ],
++        ];
++    }
++
++    /**
++     * Return the user navigations routes to register in the user menu.
++     *
++     * @return array<string, array<string, string>>
++     */
++    protected function userNavigation(): array
++    {
++        return [
++            'shop' => [
++                'route' => 'shop.profile',
++                'name' => trans('shop::messages.profile.payments'),
++                'icon' => 'bi bi-cash-coin',
++            ],
++        ];
++    }
++}
+diff --git a/plugins/shop/src/Services/EntitlementLifecycleService.php b/plugins/shop/src/Services/EntitlementLifecycleService.php
+new file mode 100644
+index 0000000..d2769e0
+--- /dev/null
++++ b/plugins/shop/src/Services/EntitlementLifecycleService.php
+@@ -0,0 +1,318 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Services;
++
++use Azuriom\Models\User;
++use Azuriom\Plugin\Shop\Enums\ConfiguredPurchaseStatus;
++use Azuriom\Plugin\Shop\Enums\UserPrivilegeEntitlementStatus;
++use Azuriom\Plugin\Shop\Exceptions\ConfiguredCheckoutException;
++use Azuriom\Plugin\Shop\Models\ConfiguredPrivilegePurchase;
++use Azuriom\Plugin\Shop\Models\UserPrivilegeEntitlement;
++use Illuminate\Database\QueryException;
++use Illuminate\Support\Facades\DB;
++use LogicException;
++
++class EntitlementLifecycleService
++{
++    public function assertCanCreateInitial(User $user, int $serverId): void
++    {
++        DB::transaction(function () use ($user, $serverId): void {
++            $entitlement = UserPrivilegeEntitlement::query()
++                ->where('user_id', $user->id)->where('server_id', $serverId)
++                ->lockForUpdate()->first();
++            if ($entitlement !== null) {
++                $this->assertTerminalForReuse($entitlement);
++            }
++        });
++    }
++
++    public function createInitialEntitlement(
++        ConfiguredPrivilegePurchase $purchase
++    ): UserPrivilegeEntitlement {
++        return DB::transaction(function () use ($purchase) {
++            $entitlement = $this->lockOrCreate($purchase);
++
++            if ($entitlement->current_purchase_id !== $purchase->id) {
++                $this->assertTerminalForReuse($entitlement);
++                $entitlement->forceFill($this->purchaseState($purchase, [
++                    'status' => UserPrivilegeEntitlementStatus::PendingActivation,
++                    'version' => $entitlement->version + 1,
++                ]))->save();
++            }
++
++            $this->assertValidState($entitlement);
++
++            return $entitlement->fresh();
++        });
++    }
++
++    public function getRenewalTail(User $user, int $serverId): ConfiguredPrivilegePurchase
++    {
++        return DB::transaction(function () use ($user, $serverId) {
++            $entitlement = $this->lock($user->id, $serverId);
++
++            return $this->tailLocked($entitlement);
++        });
++    }
++
++    public function getScheduledSuccessor(
++        ConfiguredPrivilegePurchase $purchase
++    ): ?ConfiguredPrivilegePurchase {
++        $children = ConfiguredPrivilegePurchase::query()
++            ->where('parent_purchase_id', $purchase->id)
++            ->lockForUpdate()
++            ->get();
++        if ($children->count() > 1) {
++            throw new LogicException("Purchase {$purchase->id} has a branching renewal chain.");
++        }
++
++        return $children->first();
++    }
++
++    public function activatePurchase(
++        User $user,
++        int $serverId,
++        int $purchaseId,
++        int $expectedVersion
++    ): UserPrivilegeEntitlement {
++        return DB::transaction(function () use ($user, $serverId, $purchaseId, $expectedVersion) {
++            $entitlement = $this->lock($user->id, $serverId);
++            $this->assertExpected($entitlement, $purchaseId, $expectedVersion);
++            $purchase = $this->lockedPurchase($purchaseId, $user->id, $serverId);
++
++            if ($purchase->starts_at->isFuture() || $purchase->expires_at->isPast()) {
++                throw new ConfiguredCheckoutException('purchase_not_activatable_now', 409);
++            }
++            if (! in_array($purchase->status, [
++                ConfiguredPurchaseStatus::PendingActivation,
++                ConfiguredPurchaseStatus::DeliveryFailed,
++            ], true)) {
++                throw new ConfiguredCheckoutException('invalid_purchase_transition', 409);
++            }
++
++            $purchase->update(['status' => ConfiguredPurchaseStatus::Active]);
++            $entitlement->forceFill($this->purchaseState($purchase, [
++                'status' => UserPrivilegeEntitlementStatus::Active,
++                'version' => $entitlement->version + 1,
++            ]))->save();
++            $this->assertValidState($entitlement);
++
++            return $entitlement->fresh();
++        });
++    }
++
++    public function expireCurrent(
++        User $user,
++        int $serverId,
++        int $expectedPurchaseId,
++        int $expectedVersion
++    ): UserPrivilegeEntitlement {
++        return DB::transaction(function () use ($user, $serverId, $expectedPurchaseId, $expectedVersion) {
++            $entitlement = $this->lock($user->id, $serverId);
++            $this->assertExpected($entitlement, $expectedPurchaseId, $expectedVersion);
++            if (now()->lt($entitlement->expires_at)) {
++                throw new ConfiguredCheckoutException('entitlement_not_expired', 409);
++            }
++
++            $current = $this->lockedPurchase($expectedPurchaseId, $user->id, $serverId);
++            $successor = $this->getScheduledSuccessor($current);
++            $current->update(['status' => ConfiguredPurchaseStatus::Expired]);
++
++            if ($successor !== null) {
++                $this->assertAdjacent($current, $successor);
++                if ($successor->status !== ConfiguredPurchaseStatus::Scheduled) {
++                    throw new LogicException('Expiration successor is not scheduled.');
++                }
++                $successor->update(['status' => ConfiguredPurchaseStatus::PendingActivation]);
++                $state = $this->purchaseState($successor, [
++                    'status' => UserPrivilegeEntitlementStatus::PendingActivation,
++                    'version' => $entitlement->version + 1,
++                ]);
++            } else {
++                $state = [
++                    'status' => UserPrivilegeEntitlementStatus::Expired,
++                    'version' => $entitlement->version + 1,
++                ];
++            }
++
++            $entitlement->forceFill($state)->save();
++            $this->assertValidState($entitlement);
++
++            return $entitlement->fresh();
++        });
++    }
++
++    public function revoke(
++        User $user,
++        int $serverId,
++        int $expectedPurchaseId,
++        int $expectedVersion
++    ): UserPrivilegeEntitlement {
++        return DB::transaction(function () use ($user, $serverId, $expectedPurchaseId, $expectedVersion) {
++            $entitlement = $this->lock($user->id, $serverId);
++            $this->assertExpected($entitlement, $expectedPurchaseId, $expectedVersion);
++            $purchase = $this->lockedPurchase($expectedPurchaseId, $user->id, $serverId);
++            $purchase->update(['status' => ConfiguredPurchaseStatus::Revoked]);
++            $entitlement->forceFill([
++                'status' => UserPrivilegeEntitlementStatus::Revoked,
++                'version' => $entitlement->version + 1,
++            ])->save();
++
++            return $entitlement->fresh();
++        });
++    }
++
++    private function lockOrCreate(
++        ConfiguredPrivilegePurchase $purchase
++    ): UserPrivilegeEntitlement {
++        $entitlement = UserPrivilegeEntitlement::query()
++            ->where('user_id', $purchase->user_id)
++            ->where('server_id', $purchase->server_id)
++            ->lockForUpdate()->first();
++        if ($entitlement !== null) {
++            return $entitlement;
++        }
++
++        try {
++            UserPrivilegeEntitlement::query()->create($this->purchaseState($purchase, [
++                'status' => UserPrivilegeEntitlementStatus::PendingActivation,
++                'version' => 1,
++            ]));
++        } catch (QueryException $exception) {
++            if (! str_contains($exception->getMessage(), 'shop_entitlement_user_server_uq')) {
++                throw $exception;
++            }
++        }
++
++        return $this->lock($purchase->user_id, $purchase->server_id);
++    }
++
++    private function lock(int $userId, int $serverId): UserPrivilegeEntitlement
++    {
++        return UserPrivilegeEntitlement::query()
++            ->where('user_id', $userId)->where('server_id', $serverId)
++            ->lockForUpdate()->firstOrFail();
++    }
++
++    private function tailLocked(
++        UserPrivilegeEntitlement $entitlement
++    ): ConfiguredPrivilegePurchase {
++        $current = $this->lockedPurchase(
++            $entitlement->current_purchase_id,
++            $entitlement->user_id,
++            $entitlement->server_id
++        );
++        $seen = [];
++
++        while (true) {
++            if (isset($seen[$current->id])) {
++                throw new LogicException('Renewal chain contains a cycle.');
++            }
++            $seen[$current->id] = true;
++            $child = $this->getScheduledSuccessor($current);
++            if ($child === null) {
++                return $current;
++            }
++            $this->assertAdjacent($current, $child);
++            if (
++                in_array($current->status, [
++                    ConfiguredPurchaseStatus::Revoked,
++                    ConfiguredPurchaseStatus::Refunded,
++                ], true)
++                && ! in_array($child->status, [
++                    ConfiguredPurchaseStatus::Expired,
++                    ConfiguredPurchaseStatus::Revoked,
++                    ConfiguredPurchaseStatus::Refunded,
++                ], true)
++            ) {
++                throw new LogicException('Terminal purchase has a nonterminal successor.');
++            }
++            $current = $child;
++        }
++    }
++
++    private function assertTerminalForReuse(UserPrivilegeEntitlement $entitlement): void
++    {
++        if (! in_array($entitlement->status, [
++            UserPrivilegeEntitlementStatus::Expired,
++            UserPrivilegeEntitlementStatus::Revoked,
++        ], true)) {
++            throw new ConfiguredCheckoutException('configured_entitlement_conflict', 422);
++        }
++        $tail = $this->tailLocked($entitlement);
++        if (! in_array($tail->status, [
++            ConfiguredPurchaseStatus::Expired,
++            ConfiguredPurchaseStatus::Revoked,
++            ConfiguredPurchaseStatus::Refunded,
++        ], true)) {
++            throw new ConfiguredCheckoutException('configured_chain_not_terminal', 422);
++        }
++    }
++
++    private function assertExpected(
++        UserPrivilegeEntitlement $entitlement,
++        int $purchaseId,
++        int $version
++    ): void {
++        if ($entitlement->version !== $version || $entitlement->current_purchase_id !== $purchaseId) {
++            throw new ConfiguredCheckoutException('stale_entitlement_version', 409);
++        }
++    }
++
++    private function assertValidState(UserPrivilegeEntitlement $entitlement): void
++    {
++        if ($entitlement->version < 1 || ! $entitlement->expires_at->gt($entitlement->effective_at)) {
++            throw new LogicException("Entitlement {$entitlement->id} violates interval/version invariants.");
++        }
++        $purchase = $entitlement->currentPurchase;
++        if (
++            $purchase === null
++            || $purchase->user_id !== $entitlement->user_id
++            || $purchase->server_id !== $entitlement->server_id
++        ) {
++            throw new LogicException("Entitlement {$entitlement->id} purchase identity is invalid.");
++        }
++    }
++
++    private function assertAdjacent(
++        ConfiguredPrivilegePurchase $parent,
++        ConfiguredPrivilegePurchase $child
++    ): void {
++        if (
++            $child->user_id !== $parent->user_id
++            || $child->server_id !== $parent->server_id
++            || $child->parent_purchase_id !== $parent->id
++            || ! $child->starts_at->equalTo($parent->expires_at)
++            || ! $child->expires_at->gt($child->starts_at)
++        ) {
++            throw new LogicException("Renewal edge {$parent->id} -> {$child->id} is invalid.");
++        }
++    }
++
++    private function lockedPurchase(int $id, int $userId, int $serverId): ConfiguredPrivilegePurchase
++    {
++        return ConfiguredPrivilegePurchase::query()->whereKey($id)
++            ->where('user_id', $userId)->where('server_id', $serverId)
++            ->lockForUpdate()->firstOrFail();
++    }
++
++    /**
++     * @param array<string, mixed> $overrides
++     * @return array<string, mixed>
++     */
++    private function purchaseState(
++        ConfiguredPrivilegePurchase $purchase,
++        array $overrides
++    ): array {
++        return [
++            'user_id' => $purchase->user_id,
++            'server_id' => $purchase->server_id,
++            'current_purchase_id' => $purchase->id,
++            'privilege_id' => $purchase->privilege_id,
++            'privilege_config_id' => $purchase->privilege_config_id,
++            'effective_at' => $purchase->starts_at,
++            'expires_at' => $purchase->expires_at,
++            ...$overrides,
++        ];
++    }
++}
+diff --git a/plugins/shop/src/Services/MinecraftOperationDispatcher.php b/plugins/shop/src/Services/MinecraftOperationDispatcher.php
+new file mode 100644
+index 0000000..277962e
+--- /dev/null
++++ b/plugins/shop/src/Services/MinecraftOperationDispatcher.php
+@@ -0,0 +1,198 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Services;
++
++use Azuriom\Plugin\Shop\Data\KitRedeemRequest;
++use Azuriom\Plugin\Shop\Data\PrivilegeReconcileRequest;
++use Azuriom\Plugin\Shop\Data\PrivilegeRevokeRequest;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationStatus;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
++use Azuriom\Plugin\Shop\Models\ConfiguredPrivilegePurchase;
++use Azuriom\Plugin\Shop\Models\MinecraftOperation;
++use Azuriom\Plugin\Shop\Models\UserPrivilegeEntitlement;
++use Azuriom\Plugin\Shop\Support\CanonicalJson;
++use Illuminate\Database\QueryException;
++use Illuminate\Support\Str;
++use InvalidArgumentException;
++use LogicException;
++
++class MinecraftOperationDispatcher
++{
++    public const PROTOCOL_VERSION = 1;
++
++    public function reconcile(PrivilegeReconcileRequest $request): MinecraftOperation
++    {
++        $this->assertEntitlementIdentity(
++            $request->entitlementId,
++            $request->purchaseId,
++            $request->serverId
++        );
++        $this->assertSemanticKey($request->entitlementKey);
++        $capabilities = $request->capabilities;
++        ksort($capabilities, SORT_STRING);
++
++        return $this->dispatch(
++            MinecraftOperationType::PrivilegeReconcile,
++            "entitlement:{$request->entitlementId}:version:{$request->entitlementVersion}:reconcile",
++            $request->serverId,
++            $request->playerUuid,
++            [
++                'schema_version' => 1,
++                'type' => MinecraftOperationType::PrivilegeReconcile->value,
++                'user' => ['uuid' => $request->playerUuid],
++                'entitlement' => [
++                    'id' => $request->entitlementId,
++                    'version' => $request->entitlementVersion,
++                    'purchase_id' => $request->purchaseId,
++                    'key' => $request->entitlementKey,
++                    'starts_at' => $request->startsAt->format(DATE_ATOM),
++                    'expires_at' => $request->expiresAt->format(DATE_ATOM),
++                ],
++                'capabilities' => $capabilities,
++            ],
++            $request->entitlementId,
++            $request->entitlementVersion,
++            $request->purchaseId,
++        );
++    }
++
++    public function revoke(PrivilegeRevokeRequest $request): MinecraftOperation
++    {
++        $this->assertEntitlementIdentity(
++            $request->entitlementId,
++            $request->purchaseId,
++            $request->serverId
++        );
++        $this->assertSemanticKey($request->entitlementKey);
++
++        return $this->dispatch(
++            MinecraftOperationType::PrivilegeRevoke,
++            "entitlement:{$request->entitlementId}:version:{$request->entitlementVersion}:revoke",
++            $request->serverId,
++            $request->playerUuid,
++            [
++                'schema_version' => 1,
++                'type' => MinecraftOperationType::PrivilegeRevoke->value,
++                'user' => ['uuid' => $request->playerUuid],
++                'entitlement' => [
++                    'id' => $request->entitlementId,
++                    'version' => $request->entitlementVersion,
++                    'purchase_id' => $request->purchaseId,
++                    'key' => $request->entitlementKey,
++                ],
++            ],
++            $request->entitlementId,
++            $request->entitlementVersion,
++            $request->purchaseId,
++        );
++    }
++
++    public function redeem(KitRedeemRequest $request): MinecraftOperation
++    {
++        if ($request->redemptionId < 1) {
++            throw new InvalidArgumentException('redemption_id is required.');
++        }
++        $this->assertPurchaseIdentity($request->purchaseId, $request->serverId);
++        $this->assertSemanticKey($request->deliveryKey);
++
++        return $this->dispatch(
++            MinecraftOperationType::KitRedeem,
++            "redemption:{$request->redemptionId}:redeem",
++            $request->serverId,
++            $request->playerUuid,
++            [
++                'schema_version' => 1,
++                'type' => MinecraftOperationType::KitRedeem->value,
++                'redemption_id' => $request->redemptionId,
++                'purchase_id' => $request->purchaseId,
++                'player_uuid' => $request->playerUuid,
++                'kit_key' => $request->deliveryKey,
++            ],
++            purchaseId: $request->purchaseId,
++            redemptionId: $request->redemptionId,
++        );
++    }
++
++    private function dispatch(
++        MinecraftOperationType $type,
++        string $operationKey,
++        int $serverId,
++        string $playerUuid,
++        array $payload,
++        ?int $entitlementId = null,
++        ?int $entitlementVersion = null,
++        ?int $purchaseId = null,
++        ?int $redemptionId = null,
++    ): MinecraftOperation {
++        if (! Str::isUuid($playerUuid)) {
++            throw new InvalidArgumentException('player_uuid must be a UUID.');
++        }
++        $payload = CanonicalJson::normalize($payload);
++        $hash = CanonicalJson::hash($payload);
++
++        $existing = MinecraftOperation::where('server_id', $serverId)
++            ->where('operation_key', $operationKey)->first();
++        if ($existing !== null) {
++            return $this->assertReplay($existing, $hash);
++        }
++
++        try {
++            return MinecraftOperation::create([
++                'operation_id' => (string) Str::uuid(),
++                'operation_key' => $operationKey,
++                'server_id' => $serverId,
++                'type' => $type,
++                'status' => MinecraftOperationStatus::Pending,
++                'entitlement_id' => $entitlementId,
++                'entitlement_version' => $entitlementVersion,
++                'purchase_id' => $purchaseId,
++                'redemption_id' => $redemptionId,
++                'player_uuid' => $playerUuid,
++                'protocol_version' => self::PROTOCOL_VERSION,
++                'payload' => $payload,
++                'payload_hash' => $hash,
++                'available_at' => now(),
++            ]);
++        } catch (QueryException $exception) {
++            $existing = MinecraftOperation::where('server_id', $serverId)
++                ->where('operation_key', $operationKey)->first();
++            if ($existing === null) {
++                throw $exception;
++            }
++
++            return $this->assertReplay($existing, $hash);
++        }
++    }
++
++    private function assertReplay(MinecraftOperation $operation, string $hash): MinecraftOperation
++    {
++        if (! hash_equals($operation->payload_hash, $hash)) {
++            throw new LogicException('Operation key was reused with a different payload.');
++        }
++
++        return $operation;
++    }
++
++    private function assertEntitlementIdentity(int $id, int $purchaseId, int $serverId): void
++    {
++        $exists = UserPrivilegeEntitlement::whereKey($id)
++            ->where('current_purchase_id', $purchaseId)->where('server_id', $serverId)->exists();
++        if (! $exists) {
++            throw new LogicException('Entitlement operation identity is invalid.');
++        }
++    }
++
++    private function assertPurchaseIdentity(int $id, int $serverId): void
++    {
++        if (! ConfiguredPrivilegePurchase::whereKey($id)->where('server_id', $serverId)->exists()) {
++            throw new LogicException('Purchase operation identity is invalid.');
++        }
++    }
++
++    private function assertSemanticKey(string $key): void
++    {
++        if (! preg_match('/^[a-z0-9][a-z0-9._-]{0,63}$/', $key)) {
++            throw new InvalidArgumentException('A configured semantic key is required.');
++        }
++    }
++}
+diff --git a/resources/themes/coints/views/profile/index.blade.php b/resources/themes/coints/views/profile/index.blade.php
+new file mode 100755
+index 0000000..5432e33
+--- /dev/null
++++ b/resources/themes/coints/views/profile/index.blade.php
+@@ -0,0 +1,855 @@
++@extends('layouts.app')
++
++@section('title', 'Профиль')
++
++@section('content')
++<section class="profile-hub">
++    <div class="container">
++        <div class="row align-items-start g-3">
++            <!-- Боковая панель профиля -->
++            <div class="col-lg-4">
++                <div class="profile-hub-card profile-identity">
++                    <div class="profile-hub-card-body">
++                        <div class="profile-identity-top">
++                            <div class="profile-avatar-wrap">
++                                <img src="{{ url('/api/skin-api/avatars/face/' . auth()->user()->id) }}?t={{ time() }}"
++                                     alt="{{ auth()->user()->name }}"
++                                     class="profile-avatar-img"
++                                     width="96"
++                                     height="96"
++                                     loading="lazy">
++                            </div>
++
++                            <div class="profile-identity-main">
++                                <h1 class="profile-name">{{ auth()->user()->name }}</h1>
++
++                                @if(auth()->user()->role)
++                                    <span class="badge forum-user-role profile-role-badge" style="{{ auth()->user()->role->getBadgeStyle() }}">
++                                        @if(auth()->user()->role->icon)<i class="{{ auth()->user()->role->icon }}"></i>@endif
++                                        {{ auth()->user()->role->name }}
++                                    </span>
++                                @endif
++                            </div>
++                        </div>
++
++                        <div class="profile-identity-meta">
++                            <span>
++                                <i class="bi bi-envelope me-1"></i>
++                                {{ auth()->user()->email }}
++                            </span>
++                            <span>
++                                <i class="bi bi-calendar3 me-1"></i>
++                                <strong>Регистрация:</strong>
++                                {{ format_date(auth()->user()->created_at) }}
++                            </span>
++                            @if($forumProfile?->display_last_seen && $forumProfile->last_seen_at)
++                                <span>
++                                    <i class="bi bi-clock me-1"></i>
++                                    <strong>Последний раз видели:</strong>
++                                    {{ format_date($forumProfile->last_seen_at, true) }}
++                                </span>
++                            @endif
++                            @if($forumProfile?->location)
++                                <span>
++                                    <i class="bi bi-geo-alt me-1"></i>
++                                    <strong>Расположение:</strong>
++                                    {{ $forumProfile->location }}
++                                </span>
++                            @endif
++                        </div>
++
++                        @if(($forumProfile && ($forumProfile->website || $forumProfile->telegram)) || auth()->user()->discordAccount || auth()->user()->telegramAccount)
++                            <div class="profile-forum-contacts">
++                                @if($forumProfile?->website)
++                                    <div class="profile-forum-contact">
++                                        <i class="bi bi-globe"></i>
++                                        <div>
++                                            <span class="profile-forum-contact-label">Сайт</span>
++                                            <a href="{{ $forumProfile->website }}" target="_blank" rel="noopener noreferrer">
++                                                {{ $forumProfile->website }}
++                                            </a>
++                                        </div>
++                                    </div>
++                                @endif
++
++                                @if(auth()->user()->discordAccount)
++                                    <div class="profile-forum-contact">
++                                        <i class="bi bi-discord"></i>
++                                        <div>
++                                            <span class="profile-forum-contact-label">Discord</span>
++                                            <span>{{ auth()->user()->discordAccount->name }}</span>
++                                        </div>
++                                    </div>
++                                @endif
++
++                                @if(auth()->user()->telegramAccount)
++                                    <div class="profile-forum-contact">
++                                        <i class="bi bi-telegram"></i>
++                                        <div>
++                                            <span class="profile-forum-contact-label">Telegram</span>
++                                            @if(auth()->user()->telegramAccount->profileUrl())
++                                                <a href="{{ auth()->user()->telegramAccount->profileUrl() }}" target="_blank" rel="noopener noreferrer">
++                                                    {{ auth()->user()->telegramAccount->displayName() }}
++                                                </a>
++                                            @else
++                                                <span>{{ auth()->user()->telegramAccount->displayName() }}</span>
++                                            @endif
++                                        </div>
++                                    </div>
++                                @elseif($forumProfile?->telegram)
++                                    <div class="profile-forum-contact">
++                                        <i class="bi bi-telegram"></i>
++                                        <div>
++                                            <span class="profile-forum-contact-label">Telegram</span>
++                                            <a href="https://t.me/{{ $forumProfile->telegram }}" target="_blank" rel="noopener noreferrer">
++                                                {{ '@'.$forumProfile->telegram }}
++                                            </a>
++                                        </div>
++                                    </div>
++                                @endif
++                            </div>
++                        @endif
++
++                        @if((function_exists('use_site_money') && use_site_money()) || use_site_coins())
++                            <div class="profile-balances">
++                                @if(function_exists('use_site_money') && use_site_money())
++                                    <div class="profile-balance-chip">
++                                        <div class="profile-balance-chip-amount">
++                                            @include('elements.currency-icon', ['type' => 'money', 'size' => 32])
++                                            <strong>{{ format_money(auth()->user()->money) }}</strong>
++                                        </div>
++                                        @if(Route::has('shop.offers.select'))
++                                            <a href="{{ route('shop.offers.select') }}" class="btn home-server-play profile-balance-topup">
++                                                {{ trans('shop::messages.cart.credit') }}
++                                            </a>
++                                        @endif
++                                    </div>
++                                @endif
++                                @if(use_site_coins())
++                                    <div class="profile-balance-chip">
++                                        @include('elements.currency-icon', ['type' => 'coins', 'size' => 32])
++                                        <strong>{{ format_coins(auth()->user()->coins) }}</strong>
++                                    </div>
++                                @endif
++                            </div>
++                        @endif
++
++                        <div class="quick-links d-grid gap-2">
++                            @if(plugins()->isEnabled('forum'))
++                                <a href="{{ route('forum.profile.edit') }}" class="btn home-server-play profile-hub-btn">
++                                    <i class="bi bi-pencil-square"></i>
++                                    <span>Редактировать профиль</span>
++                                </a>
++                            @endif
++                            @can('admin.access')
++                                <a href="{{ route('admin.dashboard') }}" class="profile-hub-secondary-btn">
++                                    <i class="bi bi-gear"></i>
++                                    <span>Панель управления</span>
++                                </a>
++                            @endcan
++                            <a href="{{ url('/') }}" class="profile-hub-secondary-btn">
++                                <i class="bi bi-house-door"></i>
++                                <span>На главную</span>
++                            </a>
++                        </div>
++                    </div>
++                </div>
++            </div>
++
++            <!-- Основное содержание -->
++            <div class="col-lg-8">
++                <!-- Навигация -->
++                <div class="profile-hub-card profile-tabs-card">
++                    <div class="profile-hub-card-body profile-tabs-body">
++                        <ul class="nav nav-pills profile-hub-tabs flex-wrap" id="profileTabs" role="tablist">
++                            <li class="nav-item" role="presentation">
++                                <button class="nav-link active" id="profile-tab" data-bs-toggle="pill" data-bs-target="#profile-content" type="button" role="tab">
++                                    <i class="bi bi-person me-2"></i>Профиль
++                                </button>
++                            </li>
++                            <li class="nav-item" role="presentation">
++                                <button class="nav-link" id="security-tab" data-bs-toggle="pill" data-bs-target="#security-content" type="button" role="tab">
++                                    <i class="bi bi-shield me-2"></i>Безопасность
++                                </button>
++                            </li>
++                            <li class="nav-item" role="presentation">
++                                <button class="nav-link" id="skin-tab" data-bs-toggle="pill" data-bs-target="#skin-content" type="button" role="tab">
++                                    <i class="bi bi-person-bounding-box me-2"></i>Скин
++                                </button>
++                            </li>
++                            <li class="nav-item" role="presentation">
++                                <button class="nav-link" id="stats-tab" data-bs-toggle="pill" data-bs-target="#stats-content" type="button" role="tab">
++                                    <i class="bi bi-bar-chart-line me-2"></i>Статистика
++                                </button>
++                            </li>
++                        </ul>
++                    </div>
++                </div>
++
++                <!-- Содержимое табов -->
++                <div class="tab-content">
++                    <!-- Вкладка Профиль -->
++                    <div class="tab-pane fade show active" id="profile-content" role="tabpanel">
++                        <div class="profile-hub-card">
++                            <div class="profile-hub-card-head">
++                                <h2 class="profile-hub-card-title">
++                                    <i class="bi bi-person me-2"></i>Обзор аккаунта
++                                </h2>
++                            </div>
++                            <div class="profile-hub-card-body">
++                                @if(session('success'))
++                                    <div class="alert alert-success border-primary">
++                                        <i class="bi bi-check-circle me-2"></i>{{ session('success') }}
++                                    </div>
++                                @endif
++
++                                @if(session('error'))
++                                    <div class="alert alert-danger border-primary">
++                                        <i class="bi bi-exclamation-circle me-2"></i>{{ session('error') }}
++                                    </div>
++                                @endif
++
++                                <p class="text-muted mb-4">Краткий статус аккаунта и быстрые действия. Данные аккаунта — слева, настройки — во вкладках выше.</p>
++
++                                <div class="row g-3 profile-status-grid mb-4">
++                                    <div class="col-sm-6 col-xl-3">
++                                        <div class="profile-status-card {{ auth()->user()->hasVerifiedEmail() ? 'is-ok' : 'is-warn' }}">
++                                            <div class="profile-status-icon"><i class="bi bi-envelope-check"></i></div>
++                                            <div>
++                                                <div class="profile-status-title">Email</div>
++                                                <div class="profile-status-value">
++                                                    {{ auth()->user()->hasVerifiedEmail() ? 'Подтверждён' : 'Не подтверждён' }}
++                                                </div>
++                                            </div>
++                                        </div>
++                                    </div>
++                                    <div class="col-sm-6 col-xl-3">
++                                        <div class="profile-status-card {{ auth()->user()->hasTwoFactorAuth() ? 'is-ok' : 'is-muted' }}">
++                                            <div class="profile-status-icon"><i class="bi bi-shield-lock"></i></div>
++                                            <div>
++                                                <div class="profile-status-title">2FA</div>
++                                                <div class="profile-status-value">
++                                                    {{ auth()->user()->hasTwoFactorAuth() ? 'Включена' : 'Выключена' }}
++                                                </div>
++                                            </div>
++                                        </div>
++                                    </div>
++                                    <div class="col-sm-6 col-xl-3">
++                                        <div class="profile-status-card {{ auth()->user()->discordAccount ? 'is-ok' : 'is-muted' }}">
++                                            <div class="profile-status-icon"><i class="bi bi-discord"></i></div>
++                                            <div>
++                                                <div class="profile-status-title">Discord</div>
++                                                <div class="profile-status-value">
++                                                    {{ auth()->user()->discordAccount ? auth()->user()->discordAccount->name : 'Не привязан' }}
++                                                </div>
++                                            </div>
++                                        </div>
++                                    </div>
++                                    <div class="col-sm-6 col-xl-3">
++                                        <div class="profile-status-card {{ auth()->user()->telegramAccount ? 'is-ok' : 'is-muted' }}">
++                                            <div class="profile-status-icon"><i class="bi bi-telegram"></i></div>
++                                            <div>
++                                                <div class="profile-status-title">Telegram</div>
++                                                <div class="profile-status-value">
++                                                    {{ auth()->user()->telegramAccount ? auth()->user()->telegramAccount->displayName() : 'Не привязан' }}
++                                                </div>
++                                            </div>
++                                        </div>
++                                    </div>
++                                </div>
++
++                                <div class="profile-quick-actions mb-4">
++                                    <h6 class="profile-section-title">Быстрые действия</h6>
++                                    <div class="row g-3">
++                                        <div class="col-sm-6 col-lg-4">
++                                            <button type="button" class="profile-action-tile" data-bs-toggle="pill" data-bs-target="#security-content" onclick="document.getElementById('security-tab').click()">
++                                                <i class="bi bi-shield-lock"></i>
++                                                <span>Безопасность</span>
++                                                <small>Пароль, 2FA, Discord, Telegram</small>
++                                            </button>
++                                        </div>
++                                        <div class="col-sm-6 col-lg-4">
++                                            <button type="button" class="profile-action-tile" data-bs-toggle="pill" data-bs-target="#skin-content" onclick="document.getElementById('skin-tab').click()">
++                                                <i class="bi bi-person-bounding-box"></i>
++                                                <span>Скин</span>
++                                                <small>Загрузка и предпросмотр</small>
++                                            </button>
++                                        </div>
++                                        <div class="col-sm-6 col-lg-4">
++                                            <button type="button" class="profile-action-tile" data-bs-toggle="pill" data-bs-target="#stats-content" onclick="document.getElementById('stats-tab').click()">
++                                                <i class="bi bi-bar-chart-line"></i>
++                                                <span>Статистика</span>
++                                                <small>Игровые показатели с серверов</small>
++                                            </button>
++                                        </div>
++                                    </div>
++                                </div>
++
++                                @php
++                                    $activeSubscriptions = collect($shopSubscriptions ?? [])->filter(fn ($s) => ($s->status ?? null) === 'active');
++                                @endphp
++
++                                @if($activeSubscriptions->isNotEmpty())
++                                    <div class="profile-subscriptions mb-4">
++                                        <h6 class="profile-section-title">Активные привилегии</h6>
++                                        <div class="d-grid gap-2">
++                                            @foreach($activeSubscriptions as $subscription)
++                                                <div class="profile-subscription-item">
++                                                    <div>
++                                                        <strong>{{ $subscription->package?->name ?? trans('messages.unknown') }}</strong>
++                                                        <div class="text-muted small">до {{ format_date($subscription->ends_at) }}</div>
++                                                    </div>
++                                                    <span class="badge text-bg-success">Активна</span>
++                                                </div>
++                                            @endforeach
++                                        </div>
++                                    </div>
++                                @endif
++
++                                @if(function_exists('use_site_money') && use_site_money() && use_site_coins())
++                                    <div class="currency-convert-section profile-convert-panel">
++                                        <h6 class="profile-section-title mb-2">{{ trans('messages.profile.currency_convert.title') }}</h6>
++                                        <p class="text-muted small mb-3">{{ trans('messages.profile.currency_convert.description') }}</p>
++                                        <p class="profile-convert-rate mb-3">
++                                            {{ trans('messages.profile.currency_convert.rate', [
++                                                'money' => money_name(1),
++                                                'rate' => setting('currency.convert_rate', 100),
++                                                'coins' => coins_name((float) setting('currency.convert_rate', 100)),
++                                            ]) }}
++                                            @if((float) setting('currency.convert_fee', 0) > 0)
++                                                · {{ trans('messages.profile.currency_convert.fee', ['fee' => setting('currency.convert_fee', 0)]) }}
++                                            @endif
++                                        </p>
++
++                                        <form action="{{ route('profile.convert-money') }}" method="POST" class="row g-3 align-items-end">
++                                            @csrf
++                                            <div class="col-md-7">
++                                                <label for="convertAmount" class="form-label">{{ trans('messages.profile.currency_convert.amount') }}</label>
++                                                <input type="number" min="0.01" step="0.01" class="form-control @error('amount') is-invalid @enderror" id="convertAmount" name="amount" value="{{ old('amount') }}" required>
++                                                @error('amount')
++                                                    <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                                                @enderror
++                                            </div>
++                                            <div class="col-md-5">
++                                                <button type="submit" class="btn home-server-play profile-hub-btn w-100">
++                                                    <i class="bi bi-arrow-left-right"></i>
++                                                    <span>{{ trans('messages.profile.currency_convert.submit') }}</span>
++                                                </button>
++                                            </div>
++                                        </form>
++                                    </div>
++                                @endif
++
++                                @if(use_site_coins() && isset($servers) && $servers->isNotEmpty())
++                                    <div class="currency-convert-section profile-convert-panel mt-4">
++                                        <h6 class="profile-section-title mb-2">{{ trans('messages.profile.coins_transfer.title') }}</h6>
++                                        <p class="text-muted small mb-3">{{ trans('messages.profile.coins_transfer.description') }}</p>
++                                        <p class="mb-2">
++                                            {{ trans('messages.profile.coins_transfer.global_balance', [
++                                                'balance' => format_coins((float) auth()->user()->coins),
++                                            ]) }}
++                                        </p>
++
++                                        @if(isset($balancesByServerId) && $balancesByServerId->isNotEmpty())
++                                            <ul class="list-unstyled small text-muted mb-3">
++                                                @foreach($servers as $server)
++                                                    @php $bal = (float) ($balancesByServerId->get($server->id)?->balance ?? 0); @endphp
++                                                    @continue($bal <= 0)
++                                                    <li>{{ $server->name }}: {{ format_coins($bal) }}</li>
++                                                @endforeach
++                                            </ul>
++                                        @endif
++
++                                        <form action="{{ route('profile.transfer-coins') }}" method="POST" class="row g-3 align-items-end">
++                                            @csrf
++                                            <div class="col-md-12">
++                                                <label class="form-label" for="coinsTransferDirection">{{ trans('messages.profile.coins_transfer.direction') }}</label>
++                                                @include('components.hub-select', [
++                                                    'name' => 'direction',
++                                                    'id' => 'coinsTransferDirection',
++                                                    'required' => true,
++                                                    'invalid' => $errors->has('direction'),
++                                                    'value' => old('direction', 'to_server'),
++                                                    'options' => [
++                                                        [
++                                                            'value' => 'to_site',
++                                                            'label' => trans('messages.profile.coins_transfer.to_site'),
++                                                        ],
++                                                        [
++                                                            'value' => 'to_server',
++                                                            'label' => trans('messages.profile.coins_transfer.to_server'),
++                                                        ],
++                                                    ],
++                                                ])
++                                                @error('direction')
++                                                    <span class="invalid-feedback d-block" role="alert"><strong>{{ $message }}</strong></span>
++                                                @enderror
++                                            </div>
++                                            <div class="col-md-5">
++                                                <label class="form-label" for="coinsTransferServer">{{ trans('messages.profile.coins_transfer.server') }}</label>
++                                                @include('components.hub-select', [
++                                                    'name' => 'server_id',
++                                                    'id' => 'coinsTransferServer',
++                                                    'required' => true,
++                                                    'invalid' => $errors->has('server_id'),
++                                                    'value' => old('server_id'),
++                                                    'options' => $servers->map(function ($server) use ($balancesByServerId) {
++                                                        $bal = (float) ($balancesByServerId->get($server->id)?->balance ?? 0);
++
++                                                        return [
++                                                            'value' => (string) $server->id,
++                                                            'label' => $server->name.' ('.format_coins($bal).')',
++                                                        ];
++                                                    })->values()->all(),
++                                                ])
++                                                @error('server_id')
++                                                    <span class="invalid-feedback d-block" role="alert"><strong>{{ $message }}</strong></span>
++                                                @enderror
++                                            </div>
++                                            <div class="col-md-4">
++                                                <label for="coinsTransferAmount" class="form-label">{{ trans('messages.profile.coins_transfer.amount') }}</label>
++                                                <input type="number" min="0.01" step="0.01" class="form-control @error('amount') is-invalid @enderror" id="coinsTransferAmount" name="amount" value="{{ old('amount') }}" required>
++                                                @error('amount')
++                                                    <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                                                @enderror
++                                            </div>
++                                            <div class="col-md-3">
++                                                <button type="submit" class="btn home-server-play profile-hub-btn w-100">
++                                                    <i class="bi bi-arrow-left-right"></i>
++                                                    <span>{{ trans('messages.profile.coins_transfer.submit') }}</span>
++                                                </button>
++                                            </div>
++                                        </form>
++                                    </div>
++                                @endif
++                            </div>
++                        </div>
++
++                        @if(plugins()->isEnabled('referrals'))
++                            @include('referrals::profile.card')
++                        @endif
++                    </div>
++
++                    <!-- Вкладка Безопасность -->
++                    <div class="tab-pane fade" id="security-content" role="tabpanel">
++                        <div class="profile-hub-card">
++                            <div class="profile-hub-card-head">
++                                <h2 class="profile-hub-card-title">
++                                    <i class="bi bi-shield me-2"></i>Настройки безопасности
++                                </h2>
++                            </div>
++                            <div class="profile-hub-card-body">
++                                <form action="{{ route('profile.password') }}" method="POST" class="mb-5">
++                                    @csrf
++                                    <h3 class="profile-section-title">Смена пароля</h3>
++
++                                    <div class="row g-3">
++                                        <div class="col-12">
++                                            <label for="current_password" class="form-label">Текущий пароль</label>
++                                            <div class="input-group profile-input-group">
++                                                <span class="input-group-text">
++                                                    <i class="bi bi-key"></i>
++                                                </span>
++                                                <input type="password" class="form-control @error('current_password') is-invalid @enderror"
++                                                       id="current_password" name="current_password" required>
++                                                @error('current_password')
++                                                    <div class="invalid-feedback">{{ $message }}</div>
++                                                @enderror
++                                            </div>
++                                        </div>
++
++                                        <div class="col-md-6">
++                                            <label for="password" class="form-label">Новый пароль</label>
++                                            <div class="input-group profile-input-group">
++                                                <span class="input-group-text">
++                                                    <i class="bi bi-lock"></i>
++                                                </span>
++                                                <input type="password" class="form-control @error('password') is-invalid @enderror"
++                                                       id="password" name="password" required>
++                                                <button class="btn profile-toggle-password toggle-password" type="button" aria-label="Показать пароль">
++                                                    <i class="bi bi-eye"></i>
++                                                </button>
++                                                @error('password')
++                                                    <div class="invalid-feedback">{{ $message }}</div>
++                                                @enderror
++                                            </div>
++                                        </div>
++
++                                        <div class="col-md-6">
++                                            <label for="password_confirmation" class="form-label">Подтверждение</label>
++                                            <div class="input-group profile-input-group">
++                                                <span class="input-group-text">
++                                                    <i class="bi bi-lock-fill"></i>
++                                                </span>
++                                                <input type="password" class="form-control"
++                                                       id="password_confirmation" name="password_confirmation" required>
++                                                <button class="btn profile-toggle-password toggle-password" type="button" aria-label="Показать пароль">
++                                                    <i class="bi bi-eye"></i>
++                                                </button>
++                                            </div>
++                                        </div>
++
++                                        <div class="col-12">
++                                            <button type="submit" class="btn home-server-play profile-hub-btn">
++                                                <i class="bi bi-key"></i>
++                                                <span>Сменить пароль</span>
++                                            </button>
++                                        </div>
++                                    </div>
++                                </form>
++
++                                @if(! oauth_login())
++                                <div class="profile-security-block mb-5">
++                                    <h3 class="profile-section-title">Двухфакторная аутентификация</h3>
++
++                                    @if(auth()->user()->hasTwoFactorAuth())
++                                        <div class="alert alert-success">
++                                            <i class="bi bi-shield-check me-2"></i>
++                                            2FA включена для вашего аккаунта
++                                        </div>
++                                        <div class="d-flex flex-wrap gap-2">
++                                            <a href="{{ route('profile.2fa.index') }}" class="profile-hub-secondary-btn">
++                                                <i class="bi bi-gear"></i>
++                                                <span>Управление 2FA</span>
++                                            </a>
++                                            <form action="{{ route('profile.2fa.disable') }}" method="POST" class="d-inline">
++                                                @csrf
++                                                @method('POST')
++                                                <button type="submit" class="profile-hub-danger-btn">
++                                                    <i class="bi bi-power"></i>
++                                                    <span>Отключить 2FA</span>
++                                                </button>
++                                            </form>
++                                        </div>
++                                    @else
++                                        <div class="profile-hub-note mb-3">
++                                            <p class="mb-0">
++                                                Добавьте дополнительный уровень безопасности к вашему аккаунту с помощью двухфакторной аутентификации.
++                                            </p>
++                                        </div>
++                                        <a href="{{ route('profile.2fa.index') }}" class="btn home-server-play profile-hub-btn">
++                                            <i class="bi bi-shield-check"></i>
++                                            <span>Включить 2FA</span>
++                                        </a>
++                                    @endif
++                                </div>
++                                @endif
++
++                                <div class="profile-security-block">
++                                    <h3 class="profile-section-title">Интеграция с Discord</h3>
++
++                                    @if(auth()->user()->discordAccount)
++                                        <div class="alert alert-success">
++                                            <div class="d-flex align-items-center">
++                                                <i class="bi bi-discord me-2 fs-4"></i>
++                                                <div>
++                                                    Аккаунт Discord привязан
++                                                    <div class="fw-bold">{{ auth()->user()->discordAccount->name }}</div>
++                                                </div>
++                                            </div>
++                                        </div>
++                                        <div class="profile-hub-note mb-0">
++                                            <p class="mb-0">{{ trans('messages.profile.discord.unlink_admin') }}</p>
++                                        </div>
++                                    @else
++                                        <div class="profile-hub-note mb-3">
++                                            <p class="mb-0">
++                                                Привяжите свой Discord аккаунт для удобного входа и уведомлений.
++                                            </p>
++                                        </div>
++                                        <a href="{{ route('profile.discord.link') }}" class="btn home-server-play profile-hub-btn profile-hub-btn--discord">
++                                            <i class="bi bi-discord"></i>
++                                            <span>Привязать Discord</span>
++                                        </a>
++                                    @endif
++                                </div>
++
++                                @if(($enableTelegramLink ?? telegram_link_enabled()) || auth()->user()->telegramAccount)
++                                <div class="profile-security-block">
++                                    <h3 class="profile-section-title">Интеграция с Telegram</h3>
++
++                                    @if(auth()->user()->telegramAccount)
++                                        <div class="alert alert-success">
++                                            <div class="d-flex align-items-center">
++                                                <i class="bi bi-telegram me-2 fs-4"></i>
++                                                <div>
++                                                    Аккаунт Telegram привязан
++                                                    <div class="fw-bold">{{ auth()->user()->telegramAccount->displayName() }}</div>
++                                                </div>
++                                            </div>
++                                        </div>
++                                        <div class="profile-hub-note mb-0">
++                                            <p class="mb-0">{{ trans('messages.profile.telegram.unlink_admin') }}</p>
++                                        </div>
++                                    @elseif($enableTelegramLink ?? telegram_link_enabled())
++                                        <div class="profile-hub-note mb-3">
++                                            <p class="mb-0">
++                                                Привяжите Telegram через официальный Login Widget — так сайт получит подтверждённый ID вашего аккаунта.
++                                            </p>
++                                        </div>
++                                        <div class="profile-telegram-widget">
++                                            <script async src="https://telegram.org/js/telegram-widget.js?22"
++                                                    data-telegram-login="{{ $telegramBotUsername }}"
++                                                    data-size="large"
++                                                    data-radius="8"
++                                                    data-auth-url="{{ route('profile.telegram.callback') }}"
++                                                    data-request-access="write"></script>
++                                        </div>
++                                    @endif
++                                </div>
++                                @endif
++                            </div>
++                        </div>
++                    </div>
++
++                    <!-- Вкладка Скин -->
++                    <div class="tab-pane fade" id="skin-content" role="tabpanel">
++                        <div class="profile-hub-card mb-3">
++                            <div class="profile-hub-card-head">
++                                <h2 class="profile-hub-card-title">
++                                    <i class="bi bi-eye me-2"></i>Предпросмотр
++                                </h2>
++                            </div>
++                            <div class="profile-hub-card-body">
++                                <div class="row g-3 justify-content-center text-center">
++                                    <div class="col-sm-6 col-lg-5">
++                                        <div class="profile-skin-preview-card">
++                                            <div class="profile-skin-preview-frame mb-3">
++                                                <img src="{{ url('/api/skin-api/avatars/body/' . auth()->user()->id) }}?t={{ time() }}"
++                                                     alt="Скин"
++                                                     class="profile-skin-body-preview"
++                                                     width="128"
++                                                     height="256"
++                                                     loading="lazy"
++                                                     onerror="this.onerror=null; this.src='{{ url('/api/skin-api/avatars/body/default') }}?t={{ time() }}'">
++                                            </div>
++                                            <h3 class="profile-skin-preview-title">Скин</h3>
++                                            <div class="text-muted small">Как в игре</div>
++                                        </div>
++                                    </div>
++                                    <div class="col-sm-6 col-lg-5">
++                                        <div class="profile-skin-preview-card">
++                                            <div class="profile-skin-preview-frame mb-3">
++                                                <img src="{{ url('/api/skin-api/capes/' . auth()->user()->id) }}?t={{ time() }}"
++                                                     alt="Плащ"
++                                                     class="profile-cape-preview"
++                                                     loading="lazy"
++                                                     onerror="this.onerror=null; this.style.display='none'; this.nextElementSibling?.classList.remove('d-none');">
++                                                <div class="text-muted small d-none">Плащ не загружен</div>
++                                            </div>
++                                            <h3 class="profile-skin-preview-title">Плащ</h3>
++                                            <div class="text-muted small">Предпросмотр</div>
++                                        </div>
++                                    </div>
++                                </div>
++                            </div>
++                        </div>
++
++                        <div class="profile-hub-card mb-3">
++                            <div class="profile-hub-card-head">
++                                <h2 class="profile-hub-card-title">
++                                    <i class="bi bi-upload me-2"></i>Загрузка скина и плаща
++                                </h2>
++                            </div>
++                            <div class="profile-hub-card-body">
++                                <div class="row g-4">
++                                    <div class="col-md-6">
++                                        <h3 class="profile-section-title">
++                                            <i class="bi bi-person-bounding-box me-2"></i>Скин
++                                        </h3>
++                                        <form action="{{ route('profile.skin.upload') }}" method="POST" enctype="multipart/form-data">
++                                            @csrf
++                                            <div class="mb-3">
++                                                <input type="file" class="form-control @error('skin') is-invalid @enderror"
++                                                       id="skin_tab" name="skin" accept=".png" required>
++                                                @error('skin')
++                                                    <div class="invalid-feedback">{{ $message }}</div>
++                                                @enderror
++                                                <div class="form-text text-muted small mt-1">
++                                                    PNG, 64×64 или 64×128 пикселей, до 2MB
++                                                </div>
++                                            </div>
++                                            <button type="submit" class="btn home-server-play profile-hub-btn">
++                                                <i class="bi bi-cloud-upload"></i>
++                                                <span>Загрузить скин</span>
++                                            </button>
++                                        </form>
++                                    </div>
++                                    <div class="col-md-6 profile-skin-upload-split">
++                                        <h3 class="profile-section-title">
++                                            <i class="bi bi-shield-shaded me-2"></i>Плащ
++                                        </h3>
++                                        <form action="{{ route('profile.skin.cape.upload') }}" method="POST" enctype="multipart/form-data">
++                                            @csrf
++                                            <div class="mb-3">
++                                                <input type="file" class="form-control @error('cape') is-invalid @enderror"
++                                                       id="cape_tab" name="cape" accept=".png">
++                                                @error('cape')
++                                                    <div class="invalid-feedback">{{ $message }}</div>
++                                                @enderror
++                                                <div class="form-text text-muted small mt-1">
++                                                    PNG, 64×32 пикселя, до 1MB
++                                                </div>
++                                            </div>
++                                            <button type="submit" class="profile-hub-secondary-btn">
++                                                <i class="bi bi-cloud-upload"></i>
++                                                <span>Загрузить плащ</span>
++                                            </button>
++                                        </form>
++                                    </div>
++                                </div>
++                            </div>
++                        </div>
++
++                        <div class="profile-hub-card profile-hub-card--warn">
++                            <div class="profile-hub-card-head">
++                                <h2 class="profile-hub-card-title">
++                                    <i class="bi bi-arrow-clockwise me-2"></i>Сброс скина
++                                </h2>
++                            </div>
++                            <div class="profile-hub-card-body">
++                                <p class="profile-hub-lead mb-3">
++                                    Сброс установит пустой скин и плащ, после чего будет использован стандартный скин Minecraft.
++                                </p>
++                                <form action="{{ route('profile.skin.reset') }}" method="POST" class="d-inline">
++                                    @csrf
++                                    @method('DELETE')
++                                    <button type="submit" class="profile-hub-warn-btn"
++                                            onclick="return confirm('Вы уверены, что хотите сбросить скин и плащ?')">
++                                        <i class="bi bi-arrow-clockwise"></i>
++                                        <span>Сбросить скин и плащ</span>
++                                    </button>
++                                </form>
++                            </div>
++                        </div>
++                    </div>
++
++                    <div class="tab-pane fade" id="stats-content" role="tabpanel">
++                        <div class="profile-hub-card">
++                            <div class="profile-hub-card-head">
++                                <h2 class="profile-hub-card-title">
++                                    <i class="bi bi-bar-chart-line me-2"></i>Игровая статистика
++                                </h2>
++                            </div>
++                            <div class="profile-hub-card-body">
++                                <p class="profile-hub-lead mb-4">
++                                    Показатели обновляются автоматически, пока вы онлайн на сервере.
++                                </p>
++
++                                @forelse(($playerStats ?? collect()) as $stat)
++                                    <div class="profile-game-stats-block">
++                                        <div class="profile-game-stats-head">
++                                            <div>
++                                                <h3 class="profile-section-title mb-0">
++                                                    {{ $stat->server?->name ?? 'Сервер #'.$stat->server_id }}
++                                                </h3>
++                                                @if($stat->synced_at)
++                                                    <small class="text-muted">
++                                                        Обновлено {{ format_date($stat->synced_at, true) }}
++                                                    </small>
++                                                @endif
++                                            </div>
++                                        </div>
++
++                                        <div class="profile-game-stats-summary">
++                                            <div class="profile-game-stat profile-game-stat--accent">
++                                                <i class="bi bi-clock"></i>
++                                                <span class="profile-game-stat-label">Всего в игре</span>
++                                                <strong class="profile-game-stat-value">{{ $stat->formattedPlayTime() }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat profile-game-stat--accent">
++                                                <i class="bi bi-sun"></i>
++                                                <span class="profile-game-stat-label">За сегодня</span>
++                                                <strong class="profile-game-stat-value">{{ $stat->formattedPlayTimeToday() }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat profile-game-stat--accent">
++                                                <i class="bi bi-calendar3"></i>
++                                                <span class="profile-game-stat-label">За месяц</span>
++                                                <strong class="profile-game-stat-value">{{ $stat->formattedPlayTimeMonth() }}</strong>
++                                            </div>
++                                        </div>
++
++                                        <div class="profile-game-stats-grid">
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-heart-pulse"></i>
++                                                <span class="profile-game-stat-label">С последней смерти</span>
++                                                <strong class="profile-game-stat-value">{{ $stat->formattedTimeSinceDeath() }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-skull"></i>
++                                                <span class="profile-game-stat-label">Смерти</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->deaths) }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-bug"></i>
++                                                <span class="profile-game-stat-label">Убито мобов</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->mob_kills) }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-people"></i>
++                                                <span class="profile-game-stat-label">Убито игроков</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->player_kills) }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-stars"></i>
++                                                <span class="profile-game-stat-label">Уровень XP</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->xp_level) }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-hammer"></i>
++                                                <span class="profile-game-stat-label">Добыто блоков</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->blocks_mined) }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-bricks"></i>
++                                                <span class="profile-game-stat-label">Поставлено блоков</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->blocks_placed) }}</strong>
++                                            </div>
++                                            <div class="profile-game-stat">
++                                                <i class="bi bi-signpost-2"></i>
++                                                <span class="profile-game-stat-label">Пройдено</span>
++                                                <strong class="profile-game-stat-value">{{ number_format($stat->walkKilometers(), 2) }} км</strong>
++                                            </div>
++                                        </div>
++                                    </div>
++                                @empty
++                                    <div class="profile-game-stats-empty">
++                                        <i class="bi bi-inbox"></i>
++                                        <p class="mb-1">Пока нет статистики с серверов.</p>
++                                        <p class="text-muted small mb-0">
++                                            Зайдите на сервер — показатели появятся после обновления.
++                                        </p>
++                                    </div>
++                                @endforelse
++                            </div>
++                        </div>
++                    </div>
++                </div>
++            </div>
++        </div>
++    </div>
++</section>
++@endsection
++
++@push('scripts')
++<script>
++document.addEventListener('DOMContentLoaded', function() {
++    const urlHash = window.location.hash;
++    if (urlHash) {
++        const tabTrigger = document.getElementById(urlHash.substring(1));
++        if (tabTrigger && tabTrigger.dataset.bsToggle === 'pill') {
++            new bootstrap.Tab(tabTrigger).show();
++        }
++    }
++
++    document.querySelectorAll('.toggle-password').forEach(button => {
++        button.addEventListener('click', function() {
++            const input = this.closest('.input-group').querySelector('input[type="password"], input[type="text"]');
++            const type = input.getAttribute('type') === 'password' ? 'text' : 'password';
++            input.setAttribute('type', type);
++            this.innerHTML = type === 'password' ? '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
++        });
++    });
++});
++</script>
++@endpush
+diff --git a/resources/views/admin/currency-transactions/index.blade.php b/resources/views/admin/currency-transactions/index.blade.php
+new file mode 100644
+index 0000000..cc2599d
+--- /dev/null
++++ b/resources/views/admin/currency-transactions/index.blade.php
+@@ -0,0 +1,104 @@
++@extends('admin.layouts.admin')
++
++@section('title', trans('admin.currency_transactions.title'))
++
++@section('content')
++    <div class="card shadow mb-4">
++        <div class="card-body">
++            <form method="GET" class="row g-3 mb-4">
++                <div class="col-md-3">
++                    <label class="form-label" for="userIdInput">{{ trans('admin.currency_transactions.user_id') }}</label>
++                    <input type="number" class="form-control" id="userIdInput" name="user_id" value="{{ $userId }}">
++                </div>
++                <div class="col-md-3">
++                    <label class="form-label" for="currencyInput">{{ trans('admin.currency_transactions.currency') }}</label>
++                    <select class="form-select" id="currencyInput" name="currency">
++                        <option value="">Все</option>
++                        <option value="money" @selected($currency === 'money')>{{ trans('admin.currency_transactions.currencies.money') }}</option>
++                        <option value="coins" @selected($currency === 'coins')>{{ trans('admin.currency_transactions.currencies.coins') }}</option>
++                    </select>
++                </div>
++                <div class="col-md-3">
++                    <label class="form-label" for="typeInput">{{ trans('admin.currency_transactions.type') }}</label>
++                    <select class="form-select" id="typeInput" name="type">
++                        <option value="">Все</option>
++                        @foreach(trans('admin.currency_transactions.types') as $typeKey => $typeLabel)
++                            <option value="{{ $typeKey }}" @selected($type === $typeKey)>{{ $typeLabel }}</option>
++                        @endforeach
++                    </select>
++                </div>
++                <div class="col-md-3 d-flex align-items-end">
++                    <button type="submit" class="btn btn-primary">
++                        <i class="bi bi-search"></i> {{ trans('messages.actions.search') }}
++                    </button>
++                </div>
++            </form>
++
++            <div class="table-responsive">
++                <table class="table table-striped">
++                    <thead>
++                    <tr>
++                        <th>#</th>
++                        <th>{{ trans('admin.currency_transactions.user') }}</th>
++                        <th>{{ trans('admin.currency_transactions.currency') }}</th>
++                        <th>{{ trans('admin.currency_transactions.amount') }}</th>
++                        <th>{{ trans('admin.currency_transactions.balance_after') }}</th>
++                        <th>{{ trans('admin.currency_transactions.type') }}</th>
++                        <th>{{ trans('admin.currency_transactions.details') }}</th>
++                        <th>{{ trans('admin.currency_transactions.server') }}</th>
++                        <th>{{ trans('messages.fields.date') }}</th>
++                    </tr>
++                    </thead>
++                    <tbody>
++                    @forelse($transactions as $tx)
++                        <tr>
++                            <td>{{ $tx->id }}</td>
++                            <td>
++                                @if($tx->user)
++                                    <a href="{{ route('admin.users.edit', $tx->user) }}">{{ $tx->user->name }}</a>
++                                @else
++                                    #{{ $tx->user_id }}
++                                @endif
++                            </td>
++                            <td>{{ $tx->currencyLabel() }}</td>
++                            <td class="{{ $tx->amount < 0 ? 'text-danger' : 'text-success' }}">{{ $tx->amount }}</td>
++                            <td>{{ $tx->balance_after }}</td>
++                            <td>{{ $tx->typeLabel() }}</td>
++                            <td>
++                                @if($tx->isManualAdminGrant())
++                                    @if($tx->relationLoaded('admin') && $tx->admin)
++                                        <a href="{{ route('admin.users.edit', $tx->admin) }}">{{ $tx->admin->name }}</a>
++                                    @elseif($tx->adminId())
++                                        #{{ $tx->adminId() }}
++                                    @else
++                                        —
++                                    @endif
++                                    @if($tx->adminReason())
++                                        <div class="small text-muted">{{ $tx->adminReason() }}</div>
++                                    @endif
++                                @elseif(($tx->meta['source'] ?? null) === 'referral')
++                                    @if($tx->relationLoaded('referralDetailUser') && $tx->referralDetailUser)
++                                        <a href="{{ route('admin.users.edit', $tx->referralDetailUser) }}">{{ $tx->referralDetailUser->name }}</a>
++                                    @else
++                                        —
++                                    @endif
++                                @else
++                                    {{ $tx->detailsLabel() ?? '—' }}
++                                @endif
++                            </td>
++                            <td>{{ $tx->server?->name ?? '—' }}</td>
++                            <td>{{ format_date($tx->created_at, true) }}</td>
++                        </tr>
++                    @empty
++                        <tr>
++                            <td colspan="9" class="text-center text-muted">{{ trans('messages.none') }}</td>
++                        </tr>
++                    @endforelse
++                    </tbody>
++                </table>
++            </div>
++
++            {{ $transactions->links() }}
++        </div>
++    </div>
++@endsection
+diff --git a/routes/admin.php b/routes/admin.php
+new file mode 100755
+index 0000000..41a9f0c
+--- /dev/null
++++ b/routes/admin.php
+@@ -0,0 +1,170 @@
++<?php
++
++use Azuriom\Http\Controllers\Admin\ActionLogController;
++use Azuriom\Http\Controllers\Admin\AdminController;
++use Azuriom\Http\Controllers\Admin\BanController;
++use Azuriom\Http\Controllers\Admin\HwidBanController;
++use Azuriom\Http\Controllers\Admin\HwidController;
++use Azuriom\Http\Controllers\Admin\ImageController;
++use Azuriom\Http\Controllers\Admin\NavbarController;
++use Azuriom\Http\Controllers\Admin\PageAttachmentController;
++use Azuriom\Http\Controllers\Admin\PageController;
++use Azuriom\Http\Controllers\Admin\PluginController;
++use Azuriom\Http\Controllers\Admin\PostAttachmentController;
++use Azuriom\Http\Controllers\Admin\PostController;
++use Azuriom\Http\Controllers\Admin\PostCategoryController;
++use Azuriom\Http\Controllers\Admin\RedirectController;
++use Azuriom\Http\Controllers\Admin\RoleController;
++use Azuriom\Http\Controllers\Admin\ServerController;
++use Azuriom\Http\Controllers\Admin\SettingsController;
++use Azuriom\Http\Controllers\Admin\SocialLinkController;
++use Azuriom\Http\Controllers\Admin\ThemeController;
++use Azuriom\Http\Controllers\Admin\UpdateController;
++use Azuriom\Http\Controllers\Admin\CurrencyTransactionController;
++use Azuriom\Http\Controllers\Admin\FinanceController;
++use Azuriom\Http\Controllers\Admin\FinanceExpenseController;
++use Azuriom\Http\Controllers\Admin\MoneyGrantController;
++use Azuriom\Http\Controllers\Admin\UserController;
++use Illuminate\Support\Facades\Route;
++
++Route::get('/', [AdminController::class, 'index'])->name('dashboard');
++
++Route::prefix('settings')->name('settings.')->middleware('can:admin.settings')->group(function () {
++    Route::get('/', [SettingsController::class, 'index'])->name('index');
++    Route::post('/update', [SettingsController::class, 'update'])->name('update');
++
++    Route::post('/cache/clear', [SettingsController::class, 'clearCache'])->name('cache.clear');
++    Route::post('/cache/advanced/enable', [SettingsController::class, 'enableAdvancedCache'])->name('cache.advanced.enable');
++    Route::post('/cache/advanced/clear', [SettingsController::class, 'disableAdvancedCache'])->name('cache.advanced.clear');
++
++    Route::get('/performance', [SettingsController::class, 'performance'])->name('performance');
++    Route::get('/storage/link', [SettingsController::class, 'linkStorage'])->name('link-storage');
++    Route::get('/migrate', [SettingsController::class, 'migrate'])->name('migrate');
++
++    Route::get('/home', [SettingsController::class, 'home'])->name('home');
++    Route::post('/home/update', [SettingsController::class, 'updateSeo'])->name('home.update');
++
++    Route::get('/auth', [SettingsController::class, 'auth'])->name('auth');
++    Route::post('/auth/update', [SettingsController::class, 'updateauth'])->name('auth.update');
++    Route::post('/security/update', [SettingsController::class, 'updateSecurity'])->name('security.update');
++
++    Route::get('/mail', [SettingsController::class, 'mail'])->name('mail');
++    Route::post('/mail/update', [SettingsController::class, 'updateMail'])->name('mail.update');
++    Route::post('/mail/test', [SettingsController::class, 'sendTestMail'])->name('mail.send');
++
++    Route::get('/maintenance', [SettingsController::class, 'maintenance'])->name('maintenance');
++    Route::post('/maintenance/update', [SettingsController::class, 'updateMaintenance'])->name('maintenance.update');
++
++    Route::get('/twitch', [SettingsController::class, 'twitch'])->name('twitch');
++    Route::post('/twitch/update', [SettingsController::class, 'updateTwitch'])->name('twitch.update');
++
++    Route::get('/telegram', [SettingsController::class, 'telegram'])->name('telegram');
++    Route::post('/telegram/update', [SettingsController::class, 'updateTelegram'])->name('telegram.update');
++});
++
++Route::prefix('users')->name('users.')->middleware('can:admin.users')->group(function () {
++    Route::post('/{user}/verify', [UserController::class, 'verifyEmail'])->name('verify');
++    Route::post('/{user}/2fa', [UserController::class, 'disable2fa'])->name('2fa');
++    Route::post('/{user}/password/force', [UserController::class, 'forcePasswordChange'])->name('force-password');
++    Route::post('/{user}/discord/unlink', [UserController::class, 'unlinkDiscord'])->name('discord.unlink');
++    Route::post('/{user}/telegram/unlink', [UserController::class, 'unlinkTelegram'])->name('telegram.unlink');
++    Route::post('/{user}/hwid/ban', [HwidBanController::class, 'store'])->name('hwid.ban');
++    Route::delete('/{user}/hwid/ban', [HwidBanController::class, 'destroy'])->name('hwid.unban');
++});
++
++Route::prefix('themes')->name('themes.')->middleware('can:admin.themes')->group(function () {
++    Route::get('/', [ThemeController::class, 'index'])->name('index');
++    Route::post('/reload', [ThemeController::class, 'reload'])->name('reload');
++    Route::post('/change/{theme?}', [ThemeController::class, 'changeTheme'])->name('change');
++    Route::prefix('/{theme}/config')->group(function () {
++        Route::get('/', [ThemeController::class, 'edit'])->name('edit');
++        Route::post('/', [ThemeController::class, 'config'])->name('config');
++    });
++    Route::post('/{theme}/update', [ThemeController::class, 'update'])->name('update');
++    Route::post('/{themeId}/download', [ThemeController::class, 'download'])->name('download');
++    Route::delete('/{theme}', [ThemeController::class, 'delete'])->name('delete');
++});
++
++Route::prefix('plugins')->name('plugins.')->middleware('can:admin.plugins')->group(function () {
++    Route::get('/', [PluginController::class, 'index'])->name('index');
++    Route::post('/reload', [PluginController::class, 'reload'])->name('reload');
++    Route::post('/{plugin}/enable', [PluginController::class, 'enable'])->name('enable');
++    Route::post('/{plugin}/disable', [PluginController::class, 'disable'])->name('disable');
++    Route::post('/{plugin}/update', [PluginController::class, 'update'])->name('update');
++    Route::post('/{pluginId}/download', [PluginController::class, 'download'])->name('download');
++    Route::delete('/{plugin}', [PluginController::class, 'delete'])->name('delete');
++});
++
++Route::prefix('update')->name('update.')->middleware('can:admin.update')->group(function () {
++    Route::get('/', [UpdateController::class, 'index'])->name('index');
++    Route::get('/version', [UpdateController::class, 'version'])->name('version');
++    Route::post('/fetch', [UpdateController::class, 'fetch'])->name('fetch');
++    Route::post('/download', [UpdateController::class, 'download'])->name('download');
++    Route::post('/install', [UpdateController::class, 'install'])->name('install');
++});
++
++Route::resource('navbar-elements', NavbarController::class)->except('show')->middleware('can:admin.navbar');
++Route::post('/navbar-elements/order', [NavbarController::class, 'updateOrder'])->name('navbar-elements.update-order')->middleware('can:admin.navbar');
++
++Route::resource('social-links', SocialLinkController::class)->except('show');
++Route::post('/social-links/order', [SocialLinkController::class, 'updateOrder'])->name('social-links.update-order');
++
++Route::resource('users', UserController::class)->except('show')->middleware(['can:admin.users', 'throttle:20,1']);
++Route::post('/users/notify', [UserController::class, 'notify'])->name('users.notify.all')->middleware('can:admin.users');
++Route::post('/users/{user}/notify', [UserController::class, 'notify'])->name('users.notify')->middleware('can:admin.users');
++Route::post('/users/{user}/coins/transfer', [UserController::class, 'transferCoins'])
++    ->name('users.coins.transfer')
++    ->middleware(['can:admin.users', 'can:admin.users.money', 'throttle:30,1']);
++Route::get('/currency-transactions', [CurrencyTransactionController::class, 'index'])
++    ->name('currency-transactions.index')
++    ->middleware('can:admin.users');
++Route::prefix('users/money-grants')->name('users.money-grants.')->middleware(['can:admin.users.money', 'throttle:10,1'])->group(function () {
++    Route::get('/', [MoneyGrantController::class, 'index'])->name('index');
++    Route::post('/', [MoneyGrantController::class, 'store'])->name('store');
++});
++
++Route::prefix('finance')->name('finance.')->middleware('can:admin.finance')->group(function () {
++    Route::get('/', [FinanceController::class, 'index'])->name('index');
++    Route::get('/export', [FinanceController::class, 'export'])->name('export');
++    Route::post('/bank/refresh', [FinanceController::class, 'refreshBank'])->name('bank.refresh');
++    Route::get('/settings', [FinanceController::class, 'settings'])->name('settings');
++    Route::post('/settings', [FinanceController::class, 'updateSettings'])->name('settings.update');
++
++    Route::post('/expenses/{expense}/toggle-done', [FinanceExpenseController::class, 'toggleDone'])
++        ->name('expenses.toggle-done');
++    Route::resource('expenses', FinanceExpenseController::class)->except('show');
++});
++
++Route::resource('roles', RoleController::class)->except('show')->middleware('can:admin.roles');
++Route::post('/roles/power', [RoleController::class, 'updatePower'])->name('roles.update-power')->middleware('can:admin.roles');
++Route::post('/roles/settings', [RoleController::class, 'updateSettings'])->name('roles.settings')->middleware('can:admin.roles');
++
++Route::resource('bans', BanController::class)->only('index')->middleware('can:admin.users');
++Route::resource('users.bans', BanController::class)->only(['store', 'destroy'])->middleware('can:admin.users');
++Route::get('/hwids', [HwidController::class, 'index'])->name('hwids.index')->middleware('can:admin.users');
++Route::post('/hwids/{hwid}/ban', [HwidController::class, 'ban'])->name('hwids.ban')->middleware('can:admin.users');
++Route::delete('/hwids/{hwid}/ban', [HwidController::class, 'unban'])->name('hwids.unban')->middleware('can:admin.users');
++
++Route::resource('pages', PageController::class)->except('show')->middleware('can:admin.pages');
++Route::resource('posts', PostController::class)->except('show')->middleware('can:admin.posts');
++Route::resource('images', ImageController::class)->except('show')->middleware('can:admin.images');
++Route::resource('redirects', RedirectController::class)->except('show')->middleware('can:admin.redirects');
++
++Route::resource('pages.attachments', PageAttachmentController::class)->only('store');
++Route::resource('posts.attachments', PostAttachmentController::class)->only('store');
++Route::resource('categories', PostCategoryController::class)->except('show');
++Route::post('pages/attachments/{pendingId}', [PageAttachmentController::class, 'pending'])->name('pages.attachments.pending');
++Route::post('posts/attachments/{pendingId}', [PostAttachmentController::class, 'pending'])->name('posts.attachments.pending');
++
++Route::middleware('can:admin.servers')->group(function () {
++    Route::resource('servers', ServerController::class)->except('show');
++    Route::post('/servers/{server}/verify/azlink', [ServerController::class, 'verifyAzLink'])->name('servers.verify-azlink');
++    Route::post('/servers/{server}/regenerate/azlink', [ServerController::class, 'regenerateAzLink'])->name('servers.regenerate-azlink');
++    Route::post('/servers/default', [ServerController::class, 'changeDefault'])->name('servers.change-default');
++    Route::post('/servers/update-order', [ServerController::class, 'updateOrder'])->name('servers.update-order');
++});
++
++Route::post('logs/clear', [ActionLogController::class, 'clear'])->name('logs.clear')->middleware('can:admin.logs');
++Route::resource('logs', ActionLogController::class)->only(['index', 'show'])->middleware('can:admin.logs');
++
++Route::fallback([AdminController::class, 'fallback']);
+-- 
+2.47.3
+

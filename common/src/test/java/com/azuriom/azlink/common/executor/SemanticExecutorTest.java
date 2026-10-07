@@ -47,6 +47,20 @@ class SemanticExecutorTest {
     }
 
     @Test
+    void acceptAllCapabilitiesDoesNotRejectUnknownKeys() {
+        ExecutorConfig config = OperationFixtures.configWithFly();
+        config.setAcceptAllCapabilities(true);
+        SemanticExecutor open = new SemanticExecutor(config, this.operationLedger, this.entitlementLedger, this.logger);
+        JsonObject payload = OperationFixtures.basePrivilegePayload(1, true);
+        payload.getAsJsonObject("capabilities").addProperty("claim_chunks", true);
+        ShopOperation op = new ShopOperation("19191919-1919-1919-1919-191919191910",
+                "20202020-2020-2020-2020-202020202021",
+                OperationType.PRIVILEGE_RECONCILE.toWire(), OperationFixtures.HASH_A, payload);
+
+        assertEquals(OperationResultCode.SUCCEEDED, open.process(op).getResult().getResultCode());
+    }
+
+    @Test
     void unsupportedCapabilityAck() {
         JsonObject payload = OperationFixtures.basePrivilegePayload(1, true);
         JsonObject caps = new JsonObject();

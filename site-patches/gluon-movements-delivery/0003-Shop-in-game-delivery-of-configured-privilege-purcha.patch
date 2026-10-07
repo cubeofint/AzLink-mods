@@ -1,0 +1,523 @@
+From 3759e6573b03bb05da7a45d88398c7ad9ceda28c Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 12:13:48 +0500
+Subject: [PATCH 3/4] Shop: in-game delivery of configured privilege purchases
+ (behind flag)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- ConfiguredDeliveryService + shop:configured-delivery (scheduled every minute):
+  pending purchase -> privilege_reconcile (LuckPerms group, capabilities, node expiry) and
+  kit_redeem per kit line through the existing AzLink operations poll/ack transport;
+  all succeeded -> purchase active + delivered; failed/uncertain visible; term end -> expire
+  entitlement and privilege_revoke (renewal successor is reconciled instead).
+- Deterministic operation keys make every dispatch exactly-once (replay-safe).
+- Admin page Продажи -> «Выдача в игре» with per-operation status, attempts and errors.
+- Setting shop.configured_delivery.enabled (default 0).
+---
+ ...200000_add_configured_delivery_setting.php |  19 ++
+ .../views/admin/deliveries/index.blade.php    |  85 +++++++
+ plugins/shop/routes/admin.php                 |   4 +
+ .../Commands/ConfiguredDeliveryCommand.php    |  27 +++
+ .../Controllers/Admin/DeliveryController.php  |  32 +++
+ .../src/Providers/ShopServiceProvider.php     |  22 ++
+ .../Services/ConfiguredDeliveryService.php    | 227 ++++++++++++++++++
+ 7 files changed, 416 insertions(+)
+ create mode 100644 plugins/shop/database/migrations/2026_10_07_200000_add_configured_delivery_setting.php
+ create mode 100644 plugins/shop/resources/views/admin/deliveries/index.blade.php
+ create mode 100644 plugins/shop/src/Commands/ConfiguredDeliveryCommand.php
+ create mode 100644 plugins/shop/src/Controllers/Admin/DeliveryController.php
+ create mode 100644 plugins/shop/src/Services/ConfiguredDeliveryService.php
+
+diff --git a/plugins/shop/database/migrations/2026_10_07_200000_add_configured_delivery_setting.php b/plugins/shop/database/migrations/2026_10_07_200000_add_configured_delivery_setting.php
+new file mode 100644
+index 0000000..072ff13
+--- /dev/null
++++ b/plugins/shop/database/migrations/2026_10_07_200000_add_configured_delivery_setting.php
+@@ -0,0 +1,19 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Support\Facades\DB;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        if (! DB::table('settings')->where('name', 'shop.configured_delivery.enabled')->exists()) {
++            DB::table('settings')->insert(['name' => 'shop.configured_delivery.enabled', 'value' => '0']);
++        }
++    }
++
++    public function down(): void
++    {
++        DB::table('settings')->where('name', 'shop.configured_delivery.enabled')->delete();
++    }
++};
+diff --git a/plugins/shop/resources/views/admin/deliveries/index.blade.php b/plugins/shop/resources/views/admin/deliveries/index.blade.php
+new file mode 100644
+index 0000000..c5c8ee7
+--- /dev/null
++++ b/plugins/shop/resources/views/admin/deliveries/index.blade.php
+@@ -0,0 +1,85 @@
++@extends('admin.layouts.admin')
++
++@section('title', 'Выдача в игре')
++
++@section('content')
++    @unless($enabled)
++        <div class="alert alert-info">Автоматическая выдача выключена (настройка <code>shop.configured_delivery.enabled</code>). Операции ниже не создаются, пока флаг выключен.</div>
++    @endunless
++
++    <div class="card shadow mb-4">
++        <div class="card-body">
++            <form method="GET" class="row g-3 mb-4">
++                <div class="col-md-3">
++                    <label class="form-label" for="purchaseInput">Покупка #</label>
++                    <input type="number" class="form-control" id="purchaseInput" name="purchase_id" value="{{ $purchaseId }}">
++                </div>
++                <div class="col-md-3">
++                    <label class="form-label" for="statusInput">Статус</label>
++                    <select class="form-select" id="statusInput" name="status">
++                        <option value="">Все</option>
++                        @foreach(\Azuriom\Plugin\Shop\Enums\MinecraftOperationStatus::cases() as $case)
++                            <option value="{{ $case->value }}" @selected($status === $case->value)>{{ $case->value }}</option>
++                        @endforeach
++                    </select>
++                </div>
++                <div class="col-md-3 d-flex align-items-end">
++                    <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> {{ trans('messages.actions.search') }}</button>
++                </div>
++            </form>
++
++            <div class="table-responsive">
++                <table class="table table-striped align-middle">
++                    <thead>
++                    <tr>
++                        <th>#</th>
++                        <th>Покупка</th>
++                        <th>Игрок</th>
++                        <th>Сервер</th>
++                        <th>Операция</th>
++                        <th>Статус</th>
++                        <th>Попытки</th>
++                        <th>Результат</th>
++                        <th>{{ trans('messages.fields.date') }}</th>
++                    </tr>
++                    </thead>
++                    <tbody>
++                    @forelse($operations as $op)
++                        @php
++                            $badge = match ($op->status->value) {
++                                'succeeded' => 'success', 'failed' => 'danger', 'uncertain' => 'warning',
++                                'claimed' => 'info', 'superseded', 'cancelled' => 'secondary', default => 'primary',
++                            };
++                        @endphp
++                        <tr>
++                            <td>{{ $op->id }}</td>
++                            <td>
++                                @if($op->purchase_id)
++                                    #{{ $op->purchase_id }}
++                                    <div class="small text-muted">{{ $op->purchase?->privilege_name_snapshot }} · {{ $op->purchase?->delivery_status?->value }}</div>
++                                @else — @endif
++                            </td>
++                            <td>
++                                @if($op->purchase?->user)
++                                    <a href="{{ route('admin.users.edit', $op->purchase->user) }}">{{ $op->purchase->user->name }}</a>
++                                @else
++                                    <span class="small">{{ $op->player_uuid }}</span>
++                                @endif
++                            </td>
++                            <td>{{ $op->server?->name ?? '—' }}</td>
++                            <td><code>{{ $op->type->value }}</code></td>
++                            <td><span class="badge bg-{{ $badge }}">{{ $op->status->value }}</span></td>
++                            <td>{{ $op->attempts_count }}</td>
++                            <td class="small">{{ $op->result_code ?? '—' }}@if($op->last_error)<div class="text-danger">{{ \Illuminate\Support\Str::limit($op->last_error, 120) }}</div>@endif</td>
++                            <td class="text-nowrap">{{ format_date($op->created_at, true) }}@if($op->completed_at)<div class="small text-muted">{{ format_date($op->completed_at, true) }}</div>@endif</td>
++                        </tr>
++                    @empty
++                        <tr><td colspan="9" class="text-center text-muted">{{ trans('messages.none') }}</td></tr>
++                    @endforelse
++                    </tbody>
++                </table>
++            </div>
++            {{ $operations->links() }}
++        </div>
++    </div>
++@endsection
+diff --git a/plugins/shop/routes/admin.php b/plugins/shop/routes/admin.php
+index 6ea2f1e..3b01d4b 100755
+--- a/plugins/shop/routes/admin.php
++++ b/plugins/shop/routes/admin.php
+@@ -102,3 +102,7 @@ Route::middleware('can:shop.promotions')->group(function () {
+ });
+ 
+ Route::resource('discounts', DiscountController::class)->middleware('can:shop.giftcards')->except('show');
++
++Route::middleware('can:shop.payments')->group(function () {
++    Route::get('/deliveries', [\Azuriom\Plugin\Shop\Controllers\Admin\DeliveryController::class, 'index'])->name('deliveries.index');
++});
+diff --git a/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php b/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php
+new file mode 100644
+index 0000000..a40a11a
+--- /dev/null
++++ b/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php
+@@ -0,0 +1,27 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Commands;
++
++use Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService;
++use Illuminate\Console\Command;
++
++class ConfiguredDeliveryCommand extends Command
++{
++    protected $signature = 'shop:configured-delivery';
++
++    protected $description = 'Dispatch, track and expire in-game delivery of configured privilege purchases';
++
++    public function handle(ConfiguredDeliveryService $delivery): int
++    {
++        if (! ConfiguredDeliveryService::enabled()) {
++            $this->line('shop.configured_delivery.enabled is off');
++
++            return self::SUCCESS;
++        }
++
++        $stats = $delivery->tick();
++        $this->info("dispatched={$stats['dispatched']} refreshed={$stats['refreshed']} expired={$stats['expired']}");
++
++        return self::SUCCESS;
++    }
++}
+diff --git a/plugins/shop/src/Controllers/Admin/DeliveryController.php b/plugins/shop/src/Controllers/Admin/DeliveryController.php
+new file mode 100644
+index 0000000..3e85643
+--- /dev/null
++++ b/plugins/shop/src/Controllers/Admin/DeliveryController.php
+@@ -0,0 +1,32 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Controllers\Admin;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Plugin\Shop\Models\MinecraftOperation;
++use Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService;
++use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Http\Request;
++
++class DeliveryController extends Controller
++{
++    public function index(Request $request)
++    {
++        $status = $request->input('status');
++        $purchase = $request->input('purchase_id');
++
++        $operations = MinecraftOperation::with(['server', 'purchase.user', 'attempts'])
++            ->when($status, fn (Builder $q) => $q->where('status', $status))
++            ->when($purchase, fn (Builder $q) => $q->where('purchase_id', $purchase))
++            ->latest('id')
++            ->paginate(50)
++            ->withQueryString();
++
++        return view('shop::admin.deliveries.index', [
++            'operations' => $operations,
++            'status' => $status,
++            'purchaseId' => $purchase,
++            'enabled' => ConfiguredDeliveryService::enabled(),
++        ]);
++    }
++}
+diff --git a/plugins/shop/src/Providers/ShopServiceProvider.php b/plugins/shop/src/Providers/ShopServiceProvider.php
+index c06fbd3..588e056 100755
+--- a/plugins/shop/src/Providers/ShopServiceProvider.php
++++ b/plugins/shop/src/Providers/ShopServiceProvider.php
+@@ -91,8 +91,23 @@ class ShopServiceProvider extends BasePluginServiceProvider
+         $this->commands([
+             PaymentExpireCommand::class,
+             SubscriptionRenewCommand::class,
++            \Azuriom\Plugin\Shop\Commands\ConfiguredDeliveryCommand::class,
+         ]);
+ 
++        \Illuminate\Support\Facades\Event::listen(
++            \Azuriom\Plugin\Shop\Events\MinecraftOperationSucceeded::class,
++            function (\Azuriom\Plugin\Shop\Events\MinecraftOperationSucceeded $event): void {
++                $purchase = $event->operation->purchase;
++                if ($purchase !== null && \Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService::enabled()) {
++                    try {
++                        app(\Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService::class)->refresh($purchase);
++                    } catch (\Throwable $e) {
++                        \Illuminate\Support\Facades\Log::warning('[shop] delivery refresh failed: '.$e->getMessage());
++                    }
++                }
++            }
++        );
++
+         View::composer('admin.dashboard', ShopAdminDashboardComposer::class);
+         View::composer('*', ShopViewComposer::class);
+ 
+@@ -172,6 +187,7 @@ class ShopServiceProvider extends BasePluginServiceProvider
+     {
+         $schedule->command('shop:subscriptions')->hourly();
+         $schedule->command('shop:payments')->hourly();
++        $schedule->command('shop:configured-delivery')->everyMinute()->withoutOverlapping();
+     }
+ 
+     /**
+@@ -256,6 +272,7 @@ class ShopServiceProvider extends BasePluginServiceProvider
+                             'shop.admin.payments.*',
+                             'shop.admin.purchases.*',
+                             'shop.admin.subscriptions.*',
++                            'shop.admin.deliveries.*',
+                         ],
+                         'items' => [
+                             'shop.admin.payments.index' => [
+@@ -273,6 +290,11 @@ class ShopServiceProvider extends BasePluginServiceProvider
+                                 'permission' => 'shop.payments',
+                                 'active' => 'shop.admin.subscriptions.*',
+                             ],
++                            'shop.admin.deliveries.index' => [
++                                'name' => 'Выдача в игре',
++                                'permission' => 'shop.payments',
++                                'active' => 'shop.admin.deliveries.*',
++                            ],
+                         ],
+                     ],
+                     'promo' => [
+diff --git a/plugins/shop/src/Services/ConfiguredDeliveryService.php b/plugins/shop/src/Services/ConfiguredDeliveryService.php
+new file mode 100644
+index 0000000..e9d968c
+--- /dev/null
++++ b/plugins/shop/src/Services/ConfiguredDeliveryService.php
+@@ -0,0 +1,227 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Services;
++
++use Azuriom\Plugin\Shop\Data\KitRedeemRequest;
++use Azuriom\Plugin\Shop\Data\PrivilegeReconcileRequest;
++use Azuriom\Plugin\Shop\Data\PrivilegeRevokeRequest;
++use Azuriom\Plugin\Shop\Enums\ConfiguredDeliveryStatus;
++use Azuriom\Plugin\Shop\Enums\ConfiguredPurchaseStatus;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationStatus;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
++use Azuriom\Plugin\Shop\Enums\UserPrivilegeEntitlementStatus;
++use Azuriom\Plugin\Shop\Models\ConfiguredPrivilegePurchase;
++use Azuriom\Plugin\Shop\Models\ConfiguredPurchaseKit;
++use Azuriom\Plugin\Shop\Models\MinecraftOperation;
++use Azuriom\Plugin\Shop\Models\UserPrivilegeEntitlement;
++use Illuminate\Support\Facades\Log;
++use Illuminate\Support\Str;
++use Throwable;
++
++/**
++ * In-game delivery of configured privilege purchases through the AzLink semantic executor.
++ *
++ * pending purchase  -> privilege_reconcile (LuckPerms group + capabilities, node expiry = purchase end)
++ *                   + kit_redeem per kit line (cointcore kit credits, works offline)
++ * all ops succeeded -> purchase active, delivery_status delivered
++ * any op failed     -> delivery_status failed (site retries retryable failures itself, see transport)
++ * term ended        -> entitlement expired, privilege_revoke (or successor reconciled)
++ *
++ * Every operation has a deterministic operation_key, so dispatching twice is a replay (exactly once).
++ * Off unless setting shop.configured_delivery.enabled = 1.
++ */
++class ConfiguredDeliveryService
++{
++    public function __construct(
++        private MinecraftOperationDispatcher $dispatcher,
++        private EntitlementLifecycleService $entitlements,
++    ) {
++    }
++
++    public static function enabled(): bool
++    {
++        return (bool) setting('shop.configured_delivery.enabled', false);
++    }
++
++    /** @return array{dispatched: int, refreshed: int, expired: int} */
++    public function tick(): array
++    {
++        $stats = ['dispatched' => 0, 'refreshed' => 0, 'expired' => 0];
++
++        if (! self::enabled()) {
++            return $stats;
++        }
++
++        ConfiguredPrivilegePurchase::query()
++            ->where('status', ConfiguredPurchaseStatus::PendingActivation)
++            ->where('delivery_status', ConfiguredDeliveryStatus::Pending)
++            ->where('starts_at', '<=', now())
++            ->orderBy('id')->limit(100)->get()
++            ->each(function (ConfiguredPrivilegePurchase $p) use (&$stats) {
++                $this->guard($p, fn () => $this->dispatch($p)) && $stats['dispatched']++;
++            });
++
++        ConfiguredPrivilegePurchase::query()
++            ->whereIn('delivery_status', [
++                ConfiguredDeliveryStatus::Processing, ConfiguredDeliveryStatus::Retrying,
++                ConfiguredDeliveryStatus::Failed, ConfiguredDeliveryStatus::Uncertain,
++            ])
++            ->whereIn('status', [ConfiguredPurchaseStatus::PendingActivation, ConfiguredPurchaseStatus::DeliveryFailed])
++            ->orderBy('id')->limit(200)->get()
++            ->each(function (ConfiguredPrivilegePurchase $p) use (&$stats) {
++                $this->guard($p, fn () => $this->refresh($p)) && $stats['refreshed']++;
++            });
++
++        UserPrivilegeEntitlement::query()
++            ->where('status', UserPrivilegeEntitlementStatus::Active)
++            ->where('expires_at', '<=', now())
++            ->orderBy('id')->limit(100)->get()
++            ->each(function (UserPrivilegeEntitlement $e) use (&$stats) {
++                $this->guard($e, fn () => $this->expire($e)) && $stats['expired']++;
++            });
++
++        return $stats;
++    }
++
++    public function dispatch(ConfiguredPrivilegePurchase $purchase): void
++    {
++        $purchase->loadMissing(['user', 'serverConfiguration', 'kits.kit', 'entitlement']);
++        $uuid = $this->playerUuid($purchase);
++        $entitlement = $purchase->entitlement
++            ?? UserPrivilegeEntitlement::where('current_purchase_id', $purchase->id)->firstOrFail();
++
++        $this->dispatcher->reconcile(new PrivilegeReconcileRequest(
++            $entitlement->id,
++            $entitlement->version,
++            $purchase->id,
++            $purchase->server_id,
++            $uuid,
++            $this->entitlementKey($purchase),
++            $purchase->starts_at,
++            $purchase->expires_at,
++            $this->capabilities($purchase),
++        ));
++
++        foreach ($purchase->kits as $line) {
++            $this->dispatcher->redeem(new KitRedeemRequest(
++                $line->id,
++                $purchase->id,
++                $purchase->server_id,
++                $uuid,
++                $this->kitKey($line),
++            ));
++        }
++
++        $purchase->update(['delivery_status' => ConfiguredDeliveryStatus::Processing]);
++    }
++
++    public function refresh(ConfiguredPrivilegePurchase $purchase): void
++    {
++        $ops = MinecraftOperation::query()->where('purchase_id', $purchase->id)
++            ->whereIn('type', [MinecraftOperationType::PrivilegeReconcile, MinecraftOperationType::KitRedeem])
++            ->get();
++
++        if ($ops->isEmpty()) {
++            return;
++        }
++
++        $statuses = $ops->map(fn (MinecraftOperation $op) => $op->status);
++        $done = fn (MinecraftOperationStatus $s) => in_array($s, [MinecraftOperationStatus::Succeeded, MinecraftOperationStatus::Superseded], true);
++
++        if ($statuses->every($done)) {
++            $entitlement = UserPrivilegeEntitlement::where('current_purchase_id', $purchase->id)->first();
++            if ($entitlement !== null && $entitlement->status !== UserPrivilegeEntitlementStatus::Active) {
++                $this->entitlements->activatePurchase($purchase->user, $purchase->server_id, $purchase->id, $entitlement->version);
++            }
++            $purchase->update(['delivery_status' => ConfiguredDeliveryStatus::Delivered]);
++
++            return;
++        }
++
++        $next = match (true) {
++            $statuses->contains(MinecraftOperationStatus::Uncertain) => ConfiguredDeliveryStatus::Uncertain,
++            $statuses->contains(MinecraftOperationStatus::Failed) => ConfiguredDeliveryStatus::Failed,
++            $ops->contains(fn (MinecraftOperation $op) => $op->attempts_count > 1) => ConfiguredDeliveryStatus::Retrying,
++            default => ConfiguredDeliveryStatus::Processing,
++        };
++
++        if ($purchase->delivery_status !== $next) {
++            $purchase->update(['delivery_status' => $next]);
++        }
++    }
++
++    public function expire(UserPrivilegeEntitlement $entitlement): void
++    {
++        $purchase = ConfiguredPrivilegePurchase::with('user')->findOrFail($entitlement->current_purchase_id);
++        $updated = $this->entitlements->expireCurrent($purchase->user, $entitlement->server_id, $purchase->id, $entitlement->version);
++
++        if ($updated->status === UserPrivilegeEntitlementStatus::PendingActivation) {
++            // Renewal: the successor reconcile replaces the same entitlement nodes on the server.
++            return;
++        }
++
++        $this->dispatcher->revoke(new PrivilegeRevokeRequest(
++            $updated->id,
++            $updated->version,
++            $purchase->id,
++            $purchase->server_id,
++            $this->playerUuid($purchase),
++            $this->entitlementKey($purchase),
++        ));
++    }
++
++    private function guard(object $model, callable $fn): bool
++    {
++        try {
++            $fn();
++
++            return true;
++        } catch (Throwable $e) {
++            Log::warning('[shop] configured delivery step failed for '.class_basename($model).' #'.$model->getKey().': '.$e->getMessage());
++
++            return false;
++        }
++    }
++
++    private function playerUuid(ConfiguredPrivilegePurchase $purchase): string
++    {
++        $raw = strtolower(str_replace('-', '', (string) $purchase->user?->game_id));
++        if (! preg_match('/^[0-9a-f]{32}$/', $raw)) {
++            throw new \RuntimeException('user has no Minecraft UUID');
++        }
++
++        return substr($raw, 0, 8).'-'.substr($raw, 8, 4).'-'.substr($raw, 12, 4).'-'.substr($raw, 16, 4).'-'.substr($raw, 20);
++    }
++
++    private function entitlementKey(ConfiguredPrivilegePurchase $purchase): string
++    {
++        $key = $purchase->serverConfiguration?->entitlement_key;
++
++        return $key !== null && $key !== '' ? $key : Str::slug($purchase->privilege_name_snapshot) ?: 'privilege-'.$purchase->privilege_id;
++    }
++
++    private function kitKey(ConfiguredPurchaseKit $line): string
++    {
++        $key = $line->kit?->delivery_key;
++
++        return $key !== null && $key !== '' ? $key : (string) $line->kit?->slug;
++    }
++
++    /** @return array<string, bool|int|string> */
++    private function capabilities(ConfiguredPrivilegePurchase $purchase): array
++    {
++        $final = data_get($purchase->configuration_snapshot, 'quote.capabilities.final', []);
++        $result = [];
++
++        foreach ((array) $final as $mapKey => $cap) {
++            $key = is_array($cap) ? ($cap['key'] ?? $mapKey) : $mapKey;
++            $value = is_array($cap) ? ($cap['value'] ?? null) : $cap;
++            if (! is_string($key) || $value === null || $value === false) {
++                continue;
++            }
++            $result[$key] = is_float($value) ? (string) $value : $value;
++        }
++
++        return $result;
++    }
++}
+-- 
+2.47.3
+

@@ -103,6 +103,16 @@ public final class LuckPermsPrivilegeBackend implements PrivilegeBackend {
         user.data().add(group.build());
 
         for (String permission : plan.getPermissions()) {
+            if (permission.startsWith(PrivilegePlan.META_PREFIX)) {
+                String kv = permission.substring(PrivilegePlan.META_PREFIX.length());
+                int eq = kv.indexOf('=');
+                net.luckperms.api.node.types.MetaNode.Builder meta = net.luckperms.api.node.types.MetaNode.builder(
+                                kv.substring(0, eq), kv.substring(eq + 1))
+                        .withContext(PrivilegePlan.ENTITLEMENT_CONTEXT, entitlementId);
+                applyExpiry(meta, plan.getExpiresAt());
+                user.data().add(meta.build());
+                continue;
+            }
             PermissionNode.Builder node = PermissionNode.builder(permission)
                     .value(true)
                     .withContext(PrivilegePlan.ENTITLEMENT_CONTEXT, entitlementId);

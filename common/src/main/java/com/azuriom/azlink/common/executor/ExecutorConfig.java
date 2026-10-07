@@ -33,6 +33,12 @@ public class ExecutorConfig {
     @SerializedName("supported_capabilities")
     private List<String> supportedCapabilities = defaultCapabilities();
 
+    /**
+     * Parser-only: accept any capability key from the site. Never sent on the poll wire.
+     */
+    @SerializedName("accept_all_capabilities")
+    private boolean acceptAllCapabilities;
+
     @SerializedName("poll_interval_seconds")
     private int pollIntervalSeconds = DEFAULT_POLL_INTERVAL_SECONDS;
 
@@ -55,8 +61,8 @@ public class ExecutorConfig {
     }
 
     private static List<String> defaultCapabilities() {
-        // Capability keys match shop capability definitions (e.g. fly). Empty = site will not
-        // claim privilege_reconcile ops that require capabilities; kit_redeem/revoke still work.
+        // Capability keys match shop definitions (fly, claim_chunks). Empty in the file is filled
+        // at start() with wire-safe defaults when LuckPerms is installed — never "*" or "meta:".
         return new ArrayList<String>();
     }
 
@@ -94,6 +100,14 @@ public class ExecutorConfig {
         this.supportedCapabilities = supportedCapabilities == null
                 ? new ArrayList<String>()
                 : new ArrayList<String>(supportedCapabilities);
+    }
+
+    public boolean isAcceptAllCapabilities() {
+        return this.acceptAllCapabilities;
+    }
+
+    public void setAcceptAllCapabilities(boolean acceptAllCapabilities) {
+        this.acceptAllCapabilities = acceptAllCapabilities;
     }
 
     public int getPollIntervalSeconds() {

@@ -14,6 +14,9 @@ Classic AzLink (`/api/azlink`) remains a separate channel; do not merge.
 
 - Request: `protocol_version`, `executor_version`, `supported_operation_types` (snake_case),
   `supported_capabilities`, `max_batch`
+- `supported_capabilities` items are plain shop keys (`fly`, `claim_chunks`,
+  `cointcore.bonus_claim_chunks`). Regex: `^[a-z][a-z0-9._-]{0,63}$`.
+  Do **not** send `*`, `meta:...`, or LuckPerms permission nodes.
 - Response: top-level `protocol_version`, `operations[]` with field `type` (not `operation_type`)
 - Operation types: `privilege_reconcile`, `privilege_revoke`, `kit_redeem`
 
