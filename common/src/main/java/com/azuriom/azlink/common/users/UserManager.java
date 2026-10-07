@@ -27,10 +27,21 @@ public class UserManager {
 
     public CompletableFuture<UserInfo> editCoins(UserInfo user, MoneyAction action, double amount) {
         // One key per logical mutation — HttpClient has no automatic retry loop that would regenerate it.
-        String idempotencyKey = java.util.UUID.randomUUID().toString().replace("-", "");
+        return editCoins(user, action, amount, java.util.UUID.randomUUID().toString().replace("-", ""));
+    }
+
+    /**
+     * Same as {@link #editCoins(UserInfo, MoneyAction, double)} with a caller-supplied operation id.
+     * The site applies each id exactly once, so retries with the same id are safe.
+     */
+    public CompletableFuture<UserInfo> editCoins(UserInfo user, MoneyAction action, double amount, String idempotencyKey) {
         return this.plugin.getHttpClient().editCoins(user, action.toString(), amount, idempotencyKey)
                 .thenApply(result -> {
-                    user.setCoins(result.getNewBalance());
+                    // Never write the per-server balance over the shared site balance.
+                    Double global = result.getNewGlobalBalance();
+                    if (global != null) {
+                        user.setCoins(global);
+                    }
                     return user;
                 });
     }

@@ -1,0 +1,518 @@
+From a2a887c3c513ff32999f0991aee1e620c1198f01 Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 11:44:17 +0500
+Subject: [PATCH 1/2] Gluon ledger hardening and site<->server transfer queue
+
+- CurrencyLedger: concurrent requests with the same idempotency key return the stored entry
+  instead of failing (unique index race), so each operation id applies exactly once.
+- New currency_server_operations queue (pending/applied/failed) with AzLink pull/ack API
+  GET /api/azlink/coins/operations and POST /api/azlink/coins/operations/{id}/ack.
+  Every balance change goes through the append-only ledger with op:{id}:* keys.
+- Feature flag setting currency.server_queue_enabled (default 0): endpoints return 404 when off.
+- Artisan: currency:verify-ledger (read-only), currency:queue-transfer (admin/test).
+---
+ .../Commands/CurrencyLedgerVerifyCommand.php  |  37 +++++
+ .../Commands/CurrencyQueueTransferCommand.php |  40 +++++
+ .../Api/ServerOperationController.php         |  47 ++++++
+ app/Models/CurrencyServerOperation.php        |  56 +++++++
+ app/Services/Currency/CurrencyLedger.php      |  30 +++-
+ .../Currency/ServerOperationQueue.php         | 137 ++++++++++++++++++
+ ...reate_currency_server_operations_table.php |  44 ++++++
+ routes/api.php                                |   2 +
+ 8 files changed, 387 insertions(+), 6 deletions(-)
+ create mode 100644 app/Console/Commands/CurrencyLedgerVerifyCommand.php
+ create mode 100644 app/Console/Commands/CurrencyQueueTransferCommand.php
+ create mode 100644 app/Http/Controllers/Api/ServerOperationController.php
+ create mode 100644 app/Models/CurrencyServerOperation.php
+ create mode 100644 app/Services/Currency/ServerOperationQueue.php
+ create mode 100644 database/migrations/2026_10_07_000000_create_currency_server_operations_table.php
+
+diff --git a/app/Console/Commands/CurrencyLedgerVerifyCommand.php b/app/Console/Commands/CurrencyLedgerVerifyCommand.php
+new file mode 100644
+index 0000000..80f19f8
+--- /dev/null
++++ b/app/Console/Commands/CurrencyLedgerVerifyCommand.php
+@@ -0,0 +1,37 @@
++<?php
++
++namespace Azuriom\Console\Commands;
++
++use Azuriom\Models\CurrencyTransaction;
++use Illuminate\Console\Command;
++use Illuminate\Support\Facades\DB;
++
++/**
++ * Read-only check: the shared coins balance must equal the last ledger balance_after
++ * (global scope) for every user that has ledger entries.
++ */
++class CurrencyLedgerVerifyCommand extends Command
++{
++    protected $signature = 'currency:verify-ledger';
++
++    protected $description = 'Compare users.coins with the append-only currency ledger (read-only)';
++
++    public function handle(): int
++    {
++        $rows = DB::table('currency_transactions as t')
++            ->join('users as u', 'u.id', '=', 't.user_id')
++            ->where('t.currency', CurrencyTransaction::CURRENCY_COINS)
++            ->whereRaw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.meta, '$.scope')), '') <> 'server'")
++            ->whereRaw('t.id = (SELECT MAX(t2.id) FROM currency_transactions t2 WHERE t2.user_id = t.user_id AND t2.currency = t.currency AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t2.meta, \'$.scope\')), \'\') <> \'server\')')
++            ->whereColumn('u.coins', '<>', 't.balance_after')
++            ->get(['u.id', 'u.name', 'u.coins', 't.balance_after', 't.id as tx']);
++
++        foreach ($rows as $row) {
++            $this->warn("user {$row->id} {$row->name}: coins={$row->coins} ledger={$row->balance_after} (tx {$row->tx})");
++        }
++
++        $this->info($rows->isEmpty() ? 'OK: balances match ledger' : $rows->count().' mismatches');
++
++        return $rows->isEmpty() ? self::SUCCESS : self::FAILURE;
++    }
++}
+diff --git a/app/Console/Commands/CurrencyQueueTransferCommand.php b/app/Console/Commands/CurrencyQueueTransferCommand.php
+new file mode 100644
+index 0000000..ffbf4b3
+--- /dev/null
++++ b/app/Console/Commands/CurrencyQueueTransferCommand.php
+@@ -0,0 +1,40 @@
++<?php
++
++namespace Azuriom\Console\Commands;
++
++use Azuriom\Models\User;
++use Azuriom\Services\Currency\ServerOperationQueue;
++use Illuminate\Console\Command;
++
++/**
++ * Admin/test helper: queue a gluon transfer between the site wallet and a server wallet.
++ */
++class CurrencyQueueTransferCommand extends Command
++{
++    protected $signature = 'currency:queue-transfer {user : user id or name} {server : server id} {direction : to_server|from_server} {amount : positive integer}';
++
++    protected $description = 'Queue a site<->server gluon transfer (requires currency.server_queue_enabled)';
++
++    public function handle(ServerOperationQueue $queue): int
++    {
++        if (! ServerOperationQueue::enabled()) {
++            $this->error('currency.server_queue_enabled is off');
++
++            return self::FAILURE;
++        }
++
++        $ref = $this->argument('user');
++        $user = ctype_digit($ref) ? User::find((int) $ref) : User::where('name', $ref)->first();
++
++        if ($user === null) {
++            $this->error('User not found');
++
++            return self::FAILURE;
++        }
++
++        $op = $queue->enqueue($user, (int) $this->argument('server'), $this->argument('direction'), (int) $this->argument('amount'), ['source' => 'console']);
++        $this->info("Queued {$op->id} {$op->direction} {$op->amount} for {$user->name} (status {$op->status})");
++
++        return self::SUCCESS;
++    }
++}
+diff --git a/app/Http/Controllers/Api/ServerOperationController.php b/app/Http/Controllers/Api/ServerOperationController.php
+new file mode 100644
+index 0000000..3ddd4c1
+--- /dev/null
++++ b/app/Http/Controllers/Api/ServerOperationController.php
+@@ -0,0 +1,47 @@
++<?php
++
++namespace Azuriom\Http\Controllers\Api;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Services\Currency\ServerOperationQueue;
++use Illuminate\Http\Request;
++
++/**
++ * AzLink pull/ack endpoints for the gluon transfer queue. Disabled unless
++ * setting currency.server_queue_enabled = 1.
++ */
++class ServerOperationController extends Controller
++{
++    public function __construct(private ServerOperationQueue $queue)
++    {
++    }
++
++    public function index(Request $request)
++    {
++        abort_unless(ServerOperationQueue::enabled(), 404);
++
++        $serverId = (int) $request->input('server-id');
++
++        return response()->json([
++            'operations' => $this->queue->pending($serverId, (int) $request->query('limit', 50))->values(),
++        ]);
++    }
++
++    public function ack(Request $request, string $operation)
++    {
++        abort_unless(ServerOperationQueue::enabled(), 404);
++
++        $data = $this->validate($request, [
++            'status' => ['required', 'in:applied,failed'],
++            'error' => ['nullable', 'string', 'max:500'],
++        ]);
++
++        $op = $this->queue->ack((int) $request->input('server-id'), $operation, $data['status'], $data['error'] ?? null);
++
++        if ($op === null) {
++            return response()->json(['message' => 'not_found'], 404);
++        }
++
++        return response()->json(['id' => $op->id, 'status' => $op->status]);
++    }
++}
+diff --git a/app/Models/CurrencyServerOperation.php b/app/Models/CurrencyServerOperation.php
+new file mode 100644
+index 0000000..f0d9711
+--- /dev/null
++++ b/app/Models/CurrencyServerOperation.php
+@@ -0,0 +1,56 @@
++<?php
++
++namespace Azuriom\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++/**
++ * Queued gluon transfer between the shared site wallet and one game server wallet.
++ *
++ * @property string $id
++ * @property int $user_id
++ * @property int $server_id
++ * @property string $direction
++ * @property string $amount
++ * @property string $status
++ * @property int $deliveries
++ * @property string|null $error
++ * @property array|null $meta
++ * @property \Carbon\Carbon|null $applied_at
++ */
++class CurrencyServerOperation extends Model
++{
++    public const TO_SERVER = 'to_server';
++
++    public const FROM_SERVER = 'from_server';
++
++    public const PENDING = 'pending';
++
++    public const APPLIED = 'applied';
++
++    public const FAILED = 'failed';
++
++    public $incrementing = false;
++
++    protected $keyType = 'string';
++
++    protected $fillable = [
++        'id', 'user_id', 'server_id', 'direction', 'amount', 'status', 'deliveries', 'error', 'meta', 'applied_at',
++    ];
++
++    protected $casts = [
++        'meta' => 'array',
++        'applied_at' => 'datetime',
++    ];
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function server(): BelongsTo
++    {
++        return $this->belongsTo(Server::class);
++    }
++}
+diff --git a/app/Services/Currency/CurrencyLedger.php b/app/Services/Currency/CurrencyLedger.php
+index 1a708ff..cec44e3 100644
+--- a/app/Services/Currency/CurrencyLedger.php
++++ b/app/Services/Currency/CurrencyLedger.php
+@@ -7,6 +7,7 @@ use Azuriom\Models\User;
+ use Azuriom\Models\UserServerBalance;
+ use Brick\Math\BigDecimal;
+ use Brick\Math\RoundingMode;
++use Illuminate\Database\UniqueConstraintViolationException;
+ use Illuminate\Support\Facades\DB;
+ use InvalidArgumentException;
+ use RuntimeException;
+@@ -22,9 +23,9 @@ class CurrencyLedger
+             return $existing;
+         }
+ 
+-        return DB::transaction(function () use ($user, $amount, $type, $meta, $idempotencyKey, $serverId) {
++        return $this->onceByKey($idempotencyKey, fn () => DB::transaction(function () use ($user, $amount, $type, $meta, $idempotencyKey, $serverId) {
+             return $this->mutateMoney($user, $amount, $type, $meta, $idempotencyKey, $serverId);
+-        });
++        }));
+     }
+ 
+     /**
+@@ -86,9 +87,9 @@ class CurrencyLedger
+             return $existing;
+         }
+ 
+-        return DB::transaction(function () use ($user, $amount, $type, $meta, $idempotencyKey, $serverId) {
++        return $this->onceByKey($idempotencyKey, fn () => DB::transaction(function () use ($user, $amount, $type, $meta, $idempotencyKey, $serverId) {
+             return $this->mutateCoins($user, $amount, $type, $meta, $idempotencyKey, $serverId);
+-        });
++        }));
+     }
+ 
+     /**
+@@ -100,13 +101,13 @@ class CurrencyLedger
+             return $existing;
+         }
+ 
+-        return DB::transaction(function () use ($user, $serverId, $amount, $type, $meta, $idempotencyKey) {
++        return $this->onceByKey($idempotencyKey, fn () => DB::transaction(function () use ($user, $serverId, $amount, $type, $meta, $idempotencyKey) {
+             if ($amount > 0 && $type === CurrencyTransaction::TYPE_SERVER_EARN) {
+                 $this->assertDailyServerEarnCap($user, $serverId, $amount);
+             }
+ 
+             return $this->mutateServerBalance($user, $serverId, $amount, $type, $meta, $idempotencyKey);
+-        });
++        }));
+     }
+ 
+     /**
+@@ -369,6 +370,23 @@ class CurrencyLedger
+         ]);
+     }
+ 
++    /**
++     * Run a keyed mutation; if a concurrent request with the same key won the race the unique
++     * index rejects ours (whole transaction rolled back) and we return the stored entry instead.
++     */
++    protected function onceByKey(?string $idempotencyKey, callable $mutation): CurrencyTransaction
++    {
++        try {
++            return $mutation();
++        } catch (UniqueConstraintViolationException $e) {
++            if ($existing = $this->findByIdempotency($idempotencyKey)) {
++                return $existing;
++            }
++
++            throw $e;
++        }
++    }
++
+     protected function findByIdempotency(?string $idempotencyKey): ?CurrencyTransaction
+     {
+         if ($idempotencyKey === null || $idempotencyKey === '') {
+diff --git a/app/Services/Currency/ServerOperationQueue.php b/app/Services/Currency/ServerOperationQueue.php
+new file mode 100644
+index 0000000..001d9b3
+--- /dev/null
++++ b/app/Services/Currency/ServerOperationQueue.php
+@@ -0,0 +1,137 @@
++<?php
++
++namespace Azuriom\Services\Currency;
++
++use Azuriom\Models\CurrencyServerOperation as Op;
++use Azuriom\Models\CurrencyTransaction;
++use Azuriom\Models\User;
++use Illuminate\Support\Collection;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
++use InvalidArgumentException;
++
++/**
++ * Site-side queue of gluon transfers site <-> server.
++ *
++ * to_server:   site wallet is debited at enqueue (ledger key op:{id}:debit); server credits on pull;
++ *              a failed ack refunds the site wallet (op:{id}:refund).
++ * from_server: nothing moves at enqueue; server debits its wallet on pull and acks applied,
++ *              then the site wallet is credited (op:{id}:credit). A failed ack changes nothing.
++ *
++ * Every ledger write carries a unique idempotency key, so replays/double acks never apply twice.
++ * The server applies operations for offline players as well (wallet is keyed by UUID).
++ */
++class ServerOperationQueue
++{
++    public function __construct(private CurrencyLedger $ledger)
++    {
++    }
++
++    public static function enabled(): bool
++    {
++        return (bool) setting('currency.server_queue_enabled', false);
++    }
++
++    public function enqueue(User $user, int $serverId, string $direction, int $amount, array $meta = [], ?string $id = null): Op
++    {
++        if ($amount <= 0) {
++            throw new InvalidArgumentException('Amount must be a positive integer.');
++        }
++
++        if (! in_array($direction, [Op::TO_SERVER, Op::FROM_SERVER], true)) {
++            throw new InvalidArgumentException('Unknown direction.');
++        }
++
++        $id ??= (string) Str::uuid();
++
++        if ($existing = Op::find($id)) {
++            return $existing;
++        }
++
++        return DB::transaction(function () use ($user, $serverId, $direction, $amount, $meta, $id) {
++            if ($direction === Op::TO_SERVER) {
++                $this->ledger->adjustCoins($user, -$amount, CurrencyTransaction::TYPE_WITHDRAW, [
++                    'direction' => 'to_server', 'operation_id' => $id,
++                ], "op:{$id}:debit", $serverId);
++            }
++
++            return Op::create([
++                'id' => $id,
++                'user_id' => $user->id,
++                'server_id' => $serverId,
++                'direction' => $direction,
++                'amount' => $amount,
++                'status' => Op::PENDING,
++                'meta' => $meta === [] ? null : $meta,
++            ]);
++        });
++    }
++
++    /**
++     * Pending operations for one server. Does not depend on the player being online.
++     */
++    public function pending(int $serverId, int $limit = 50): Collection
++    {
++        $ops = Op::with('user')
++            ->where('server_id', $serverId)
++            ->where('status', Op::PENDING)
++            ->orderBy('created_at')
++            ->limit(max(1, min($limit, 200)))
++            ->get();
++
++        if ($ops->isNotEmpty()) {
++            Op::whereIn('id', $ops->modelKeys())->increment('deliveries');
++        }
++
++        return $ops->map(fn (Op $op) => [
++            'id' => $op->id,
++            'user_id' => $op->user_id,
++            'game_id' => $op->user?->game_id,
++            'name' => $op->user?->name,
++            'amount' => (string) $op->amount,
++            'direction' => $op->direction,
++            'created_at' => $op->created_at?->toIso8601String(),
++        ]);
++    }
++
++    /**
++     * Idempotent: an already final operation is returned unchanged.
++     */
++    public function ack(int $serverId, string $id, string $status, ?string $error = null): ?Op
++    {
++        if (! in_array($status, [Op::APPLIED, Op::FAILED], true)) {
++            throw new InvalidArgumentException('Unknown status.');
++        }
++
++        return DB::transaction(function () use ($serverId, $id, $status, $error) {
++            $op = Op::query()->whereKey($id)->where('server_id', $serverId)->lockForUpdate()->first();
++
++            if ($op === null || $op->status !== Op::PENDING) {
++                return $op;
++            }
++
++            $user = User::findOrFail($op->user_id);
++            $amount = (float) $op->amount;
++
++            if ($status === Op::APPLIED && $op->direction === Op::FROM_SERVER) {
++                $this->ledger->adjustCoins($user, $amount, CurrencyTransaction::TYPE_DEPOSIT, [
++                    'direction' => 'from_server', 'operation_id' => $op->id,
++                ], "op:{$op->id}:credit", $serverId);
++            }
++
++            if ($status === Op::FAILED && $op->direction === Op::TO_SERVER) {
++                $this->ledger->adjustCoins($user, $amount, CurrencyTransaction::TYPE_WITHDRAW, [
++                    'direction' => 'refund', 'operation_id' => $op->id, 'reason' => $error,
++                ], "op:{$op->id}:refund", $serverId);
++            }
++
++            $op->forceFill([
++                'status' => $status,
++                'error' => $error !== null ? Str::limit($error, 180) : null,
++                'applied_at' => $status === Op::APPLIED ? now() : null,
++            ])->save();
++
++            return $op;
++        });
++    }
++}
+diff --git a/database/migrations/2026_10_07_000000_create_currency_server_operations_table.php b/database/migrations/2026_10_07_000000_create_currency_server_operations_table.php
+new file mode 100644
+index 0000000..34f9fbf
+--- /dev/null
++++ b/database/migrations/2026_10_07_000000_create_currency_server_operations_table.php
+@@ -0,0 +1,44 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        if (! Schema::hasTable('currency_server_operations')) {
++            Schema::create('currency_server_operations', function (Blueprint $table) {
++                $table->string('id', 40)->primary();
++                $table->unsignedInteger('user_id');
++                $table->unsignedInteger('server_id');
++                $table->string('direction', 16); // to_server | from_server
++                $table->decimal('amount', 14, 2);
++                $table->string('status', 16)->default('pending'); // pending | applied | failed
++                $table->unsignedInteger('deliveries')->default(0);
++                $table->string('error', 191)->nullable();
++                $table->json('meta')->nullable();
++                $table->timestamp('applied_at')->nullable();
++                $table->timestamps();
++
++                $table->index(['server_id', 'status', 'created_at']);
++                $table->index(['user_id', 'created_at']);
++                $table->foreign('user_id')->references('id')->on('users')->cascadeOnDelete();
++                $table->foreign('server_id')->references('id')->on('servers')->cascadeOnDelete();
++            });
++        }
++
++        // Feature flag: off until tested and confirmed.
++        if (! DB::table('settings')->where('name', 'currency.server_queue_enabled')->exists()) {
++            DB::table('settings')->insert(['name' => 'currency.server_queue_enabled', 'value' => '0']);
++        }
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('currency_server_operations');
++        DB::table('settings')->where('name', 'currency.server_queue_enabled')->delete();
++    }
++};
+diff --git a/routes/api.php b/routes/api.php
+index 76ab77a..ac28c2a 100755
+--- a/routes/api.php
++++ b/routes/api.php
+@@ -28,6 +28,8 @@ Route::prefix('/azlink')->middleware('server.token')->group(function () {
+     Route::post('/user/{user}/coins/remove', [ServerController::class, 'removeCoins']);
+     Route::post('/user/{user}/coins/withdraw', [ServerController::class, 'withdrawCoins']);
+     Route::post('/user/{user}/coins/deposit', [ServerController::class, 'depositCoins']);
++    Route::get('/coins/operations', [\Azuriom\Http\Controllers\Api\ServerOperationController::class, 'index']);
++    Route::post('/coins/operations/{operation}/ack', [\Azuriom\Http\Controllers\Api\ServerOperationController::class, 'ack']);
+     Route::post('/register', [ServerController::class, 'register']);
+     Route::post('/email', [ServerController::class, 'updateEmail']);
+     Route::post('/password', [ServerController::class, 'updatePassword']);
+-- 
+2.47.3
+

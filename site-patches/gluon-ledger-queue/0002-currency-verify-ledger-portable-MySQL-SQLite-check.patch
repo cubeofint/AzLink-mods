@@ -1,0 +1,63 @@
+From 8b064f4d39ff83c94181fdb30a3a7945d17c3d3f Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 11:59:12 +0500
+Subject: [PATCH 2/2] currency:verify-ledger: portable MySQL/SQLite check
+
+---
+ .../Commands/CurrencyLedgerVerifyCommand.php  | 32 ++++++++++++++-----
+ 1 file changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/app/Console/Commands/CurrencyLedgerVerifyCommand.php b/app/Console/Commands/CurrencyLedgerVerifyCommand.php
+index 80f19f8..fa0476a 100644
+--- a/app/Console/Commands/CurrencyLedgerVerifyCommand.php
++++ b/app/Console/Commands/CurrencyLedgerVerifyCommand.php
+@@ -3,8 +3,8 @@
+ namespace Azuriom\Console\Commands;
+ 
+ use Azuriom\Models\CurrencyTransaction;
++use Brick\Math\BigDecimal;
+ use Illuminate\Console\Command;
+-use Illuminate\Support\Facades\DB;
+ 
+ /**
+  * Read-only check: the shared coins balance must equal the last ledger balance_after
+@@ -18,13 +18,29 @@ class CurrencyLedgerVerifyCommand extends Command
+ 
+     public function handle(): int
+     {
+-        $rows = DB::table('currency_transactions as t')
+-            ->join('users as u', 'u.id', '=', 't.user_id')
+-            ->where('t.currency', CurrencyTransaction::CURRENCY_COINS)
+-            ->whereRaw("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.meta, '$.scope')), '') <> 'server'")
+-            ->whereRaw('t.id = (SELECT MAX(t2.id) FROM currency_transactions t2 WHERE t2.user_id = t.user_id AND t2.currency = t.currency AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t2.meta, \'$.scope\')), \'\') <> \'server\')')
+-            ->whereColumn('u.coins', '<>', 't.balance_after')
+-            ->get(['u.id', 'u.name', 'u.coins', 't.balance_after', 't.id as tx']);
++        $rows = collect();
++
++        // Portable (MySQL/SQLite): walk coin entries per user, newest first, skip per-server scope.
++        CurrencyTransaction::query()
++            ->where('currency', CurrencyTransaction::CURRENCY_COINS)
++            ->orderBy('user_id')->orderByDesc('id')
++            ->with('user:id,name,coins')
++            ->lazy()
++            ->groupBy('user_id')
++            ->each(function ($txs) use ($rows) {
++                $last = $txs->first(fn (CurrencyTransaction $t) => ($t->meta['scope'] ?? null) !== 'server');
++
++                if ($last === null || $last->user === null) {
++                    return;
++                }
++
++                if (! BigDecimal::of((string) $last->user->getRawOriginal('coins'))->isEqualTo((string) $last->getRawOriginal('balance_after'))) {
++                    $rows->push((object) [
++                        'id' => $last->user->id, 'name' => $last->user->name,
++                        'coins' => $last->user->coins, 'balance_after' => $last->balance_after, 'tx' => $last->id,
++                    ]);
++                }
++            });
+ 
+         foreach ($rows as $row) {
+             $this->warn("user {$row->id} {$row->name}: coins={$row->coins} ledger={$row->balance_after} (tx {$row->tx})");
+-- 
+2.47.3
+
