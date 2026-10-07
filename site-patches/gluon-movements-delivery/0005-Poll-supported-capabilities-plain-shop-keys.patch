@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Wed, 7 Oct 2026 12:40:00 +0500
+Subject: [PATCH 5/5] Shop poll: accept plain capability keys only
+
+supported_capabilities.* must match ^[a-z][a-z0-9._-]{0,63}$
+(fly, claim_chunks, cointcore.bonus_claim_chunks). Reject "*", "meta:…".
+---
+ .../Requests/AzLink/PollOperationsRequest.php | 48 +++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+ create mode 100644 plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php
+
+diff --git a/plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php b/plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php
+new file mode 100644
+index 0000000..c0ff001
+--- /dev/null
++++ b/plugins/shop/src/Http/Requests/AzLink/PollOperationsRequest.php
+@@ -0,0 +1,48 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Http\Requests\AzLink;
++
++use Illuminate\Foundation\Http\FormRequest;
++
++/**
++ * POST /api/shop/azlink/v1/operations/poll (and aliased /api/azlink/v1/operations/poll).
++ *
++ * Wire capability keys are shop definitions, not LuckPerms nodes.
++ * Valid: fly, claim_chunks, cointcore.bonus_claim_chunks
++ * Invalid: *, meta:cointcore.bonus_claim_chunks, azlink.capability.fly
++ */
++class PollOperationsRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return true;
++    }
++
++    public function rules(): array
++    {
++        return [
++            'protocol_version' => ['required', 'integer', 'min:1'],
++            'executor_version' => ['required', 'string', 'max:64'],
++            'supported_operation_types' => ['required', 'array', 'min:1'],
++            'supported_operation_types.*' => ['required', 'string', 'in:privilege_reconcile,privilege_revoke,kit_redeem'],
++            'supported_capabilities' => ['present', 'array'],
++            'supported_capabilities.*' => ['required', 'string', 'regex:/^[a-z][a-z0-9._-]{0,63}$/'],
++            'max_batch' => ['required', 'integer', 'min:1', 'max:100'],
++        ];
++    }
++
++    public function messages(): array
++    {
++        return [
++            'supported_capabilities.*.regex' => 'supported_capabilities must be plain shop keys (fly, claim_chunks), not * or meta:…',
++        ];
++    }
++}
++
+-- 
+2.47.3

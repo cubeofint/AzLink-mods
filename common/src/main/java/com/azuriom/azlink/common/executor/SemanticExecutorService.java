@@ -16,7 +16,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -62,9 +61,10 @@ public class SemanticExecutorService {
 
         try {
             this.config = loadOrCreateConfig();
-            if (this.luckPermsAcceptAllCapabilities && this.config.getSupportedCapabilities().isEmpty()) {
-                this.config.setSupportedCapabilities(Collections.singletonList("*"));
-            }
+            CapabilityKeys.Resolution capabilities = CapabilityKeys.resolve(
+                    this.config.getSupportedCapabilities(), this.luckPermsAcceptAllCapabilities);
+            this.config.setSupportedCapabilities(capabilities.getAdvertised());
+            this.config.setAcceptAllCapabilities(capabilities.isAcceptAll());
             JsonOperationLedger operationLedger = JsonOperationLedger.openDefault(dataDir);
             EntitlementVersionLedger entitlementLedger = EntitlementVersionLedger.openDefault(dataDir);
             this.executor = new SemanticExecutor(this.config, operationLedger, entitlementLedger,

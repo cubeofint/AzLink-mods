@@ -21,10 +21,13 @@ public class OperationParser {
 
     private final Set<String> supportedCapabilities;
     private final Set<String> supportedTypes;
+    private final boolean acceptAllCapabilities;
 
     public OperationParser(ExecutorConfig config) {
         this.supportedCapabilities = toLowerSet(config.getSupportedCapabilities());
         this.supportedTypes = toLowerSet(config.getSupportedOperationTypes());
+        this.acceptAllCapabilities = config.isAcceptAllCapabilities()
+                || this.supportedCapabilities.contains("*");
     }
 
     public ExecutionResult validate(ShopOperation operation) {
@@ -126,7 +129,7 @@ public class OperationParser {
                 return ExecutionResult.of(OperationResultCode.FAILED, "empty capability key");
             }
             String normalized = capability.trim().toLowerCase(Locale.ROOT);
-            if (this.supportedCapabilities.contains("*")) {
+            if (this.acceptAllCapabilities) {
                 continue;
             }
             if (!this.supportedCapabilities.contains(normalized)) {
