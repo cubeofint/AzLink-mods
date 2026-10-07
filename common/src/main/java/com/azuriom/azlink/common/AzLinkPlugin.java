@@ -136,6 +136,7 @@ public class AzLinkPlugin {
         }
 
         this.httpServer = createHttpServer();
+        com.azuriom.azlink.common.coins.CoinOperationsBridge.install(this);
 
         // Add a random start delay to prevent important load on shared web hosts
         // caused by many servers sending request at the same time

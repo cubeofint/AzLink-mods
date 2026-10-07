@@ -56,6 +56,25 @@ public class HttpClient {
         return editCoins(user, action, amount, java.util.UUID.randomUUID().toString());
     }
 
+    /**
+     * Pending site&lt;-&gt;server coin operations queued for this server (JSON body of the site response).
+     */
+    public CompletableFuture<com.google.gson.JsonObject> fetchCoinOperations(int limit) {
+        return request(RequestMethod.GET, "/azlink/coins/operations?limit=" + limit, null, com.google.gson.JsonObject.class);
+    }
+
+    /**
+     * Acknowledge a queued operation. {@code status} is {@code applied} or {@code failed}. Idempotent on the site.
+     */
+    public CompletableFuture<com.google.gson.JsonObject> ackCoinOperation(String operationId, String status, String error) {
+        JsonObject params = new JsonObject();
+        params.addProperty("status", status);
+        if (error != null) {
+            params.addProperty("error", error);
+        }
+        return request(RequestMethod.POST, "/azlink/coins/operations/" + operationId + "/ack", params, com.google.gson.JsonObject.class);
+    }
+
     public CompletableFuture<WebsiteResponse> postData(ServerData data) {
         return request(RequestMethod.POST, "/azlink", data, WebsiteResponse.class);
     }
