@@ -64,6 +64,10 @@ Existing behaviour is unchanged while the global queue flag is off.
      enqueue two reconcile ops; probe command skips users with a pending op;
    - admin server-balance table keeps its scroll/sticky header;
    - tests set flags via `Setting::updateSettings` (Azuriom reads settings from cache).
+4. `0004` — the profile tab "Движение валют" (and its partial) is shown only when movements are
+   enabled **and** the user has `admin.access` or `currency.server_movements_public = 1`
+   (default off): `CurrencyServerMovement::visibleTo()`. Receiving movements from servers is
+   still governed by `currency.server_movements_enabled` only.
 
 ## Apply (after DB dump + file backup, with confirmation)
 
@@ -72,6 +76,7 @@ cd /var/www/main-site
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0001-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0002-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0003-*.patch
+git apply ../AzLink-mods/site-patches/gluon-server-adjust/0004-*.patch
 php artisan migrate --force
 php artisan currency:verify-ledger
 # enable only when ready, e.g. server 9 only:
@@ -86,6 +91,7 @@ php artisan currency:verify-ledger
 ```
 cd /var/www/main-site
 php vendor/bin/phpunit tests/Feature/CurrencyServerSyncTest.php
+php vendor/bin/phpunit tests/Feature/CurrencyMovementVisibilityTest.php
 ```
 
 Run the file directly (`--filter` loads every test file, and an unrelated existing test has a
