@@ -1,0 +1,157 @@
+From 695b5047af5cbde7d92046331b3961c9873564c7 Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Thu, 8 Oct 2026 09:48:21 +0500
+Subject: [PATCH] Movement history tab: admin only unless
+ currency.server_movements_public
+
+CurrencyServerMovement::visibleTo(): the profile tab and partial are shown
+only when movements are enabled and the user has admin.access or the new
+setting currency.server_movements_public (default off) is set. Receiving
+movements from servers is still governed by server_movements_enabled.
+---
+ app/Models/CurrencyServerMovement.php         | 14 ++++
+ .../coints/views/profile/index.blade.php      |  4 +-
+ .../profile/_currency-movements.blade.php     |  2 +
+ .../CurrencyMovementVisibilityTest.php        | 71 +++++++++++++++++++
+ 4 files changed, 89 insertions(+), 2 deletions(-)
+ create mode 100644 tests/Feature/CurrencyMovementVisibilityTest.php
+
+diff --git a/app/Models/CurrencyServerMovement.php b/app/Models/CurrencyServerMovement.php
+index 06b5a2a..26f7723 100644
+--- a/app/Models/CurrencyServerMovement.php
++++ b/app/Models/CurrencyServerMovement.php
+@@ -75,4 +75,18 @@ class CurrencyServerMovement extends Model
+     {
+         return (bool) setting('currency.server_movements_enabled', false);
+     }
++
++    /**
++     * Whether the player-facing movement history may be shown to this user.
++     * Receiving movements from servers is governed by enabled() alone.
++     */
++    public static function visibleTo(?User $user): bool
++    {
++        if ($user === null || ! self::enabled()) {
++            return false;
++        }
++
++        return $user->can('admin.access')
++            || (bool) setting('currency.server_movements_public', false);
++    }
+ }
+diff --git a/resources/themes/coints/views/profile/index.blade.php b/resources/themes/coints/views/profile/index.blade.php
+index e5db2df..478dd76 100755
+--- a/resources/themes/coints/views/profile/index.blade.php
++++ b/resources/themes/coints/views/profile/index.blade.php
+@@ -177,7 +177,7 @@
+                                     <i class="bi bi-person-bounding-box me-2"></i>Скин
+                                 </button>
+                             </li>
+-                            @if(\Azuriom\Models\CurrencyServerMovement::enabled())
++                            @if(\Azuriom\Models\CurrencyServerMovement::visibleTo(auth()->user()))
+                             <li class="nav-item" role="presentation">
+                                 <button class="nav-link" id="movements-tab" data-bs-toggle="pill" data-bs-target="#movements-content" type="button" role="tab">
+                                     <i class="bi bi-arrow-left-right me-2"></i>Движение валют
+@@ -437,7 +437,7 @@
+                         @endif
+                     </div>
+ 
+-                    @if(\Azuriom\Models\CurrencyServerMovement::enabled())
++                    @if(\Azuriom\Models\CurrencyServerMovement::visibleTo(auth()->user()))
+                     <!-- Вкладка Движение валют -->
+                     <div class="tab-pane fade" id="movements-content" role="tabpanel">
+                         @include('profile._currency-movements')
+diff --git a/resources/views/profile/_currency-movements.blade.php b/resources/views/profile/_currency-movements.blade.php
+index 944f84b..0ab822f 100644
+--- a/resources/views/profile/_currency-movements.blade.php
++++ b/resources/views/profile/_currency-movements.blade.php
+@@ -1,3 +1,4 @@
++@if(\Azuriom\Models\CurrencyServerMovement::visibleTo(auth()->user()))
+ @php
+     $movementUser = auth()->user();
+     $movements = \Azuriom\Models\CurrencyServerMovement::with('server')
+@@ -48,3 +49,4 @@
+         @endif
+     </div>
+ </div>
++@endif
+diff --git a/tests/Feature/CurrencyMovementVisibilityTest.php b/tests/Feature/CurrencyMovementVisibilityTest.php
+new file mode 100644
+index 0000000..6c61931
+--- /dev/null
++++ b/tests/Feature/CurrencyMovementVisibilityTest.php
+@@ -0,0 +1,71 @@
++<?php
++
++namespace Tests\Feature;
++
++use Azuriom\Models\CurrencyServerMovement;
++use Azuriom\Models\Role;
++use Azuriom\Models\Setting;
++use Azuriom\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Tests\TestCase;
++
++/**
++ *   php artisan test --filter=CurrencyMovementVisibilityTest
++ */
++class CurrencyMovementVisibilityTest extends TestCase
++{
++    use RefreshDatabase;
++
++    private User $player;
++
++    private User $admin;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        $this->player = User::factory()->create([
++            'role_id' => Role::query()->create(['name' => 'Player', 'color' => '999999', 'power' => 0, 'is_admin' => false])->id,
++        ]);
++        $this->admin = User::factory()->create([
++            'role_id' => Role::query()->create(['name' => 'Admin', 'color' => 'ff0000', 'power' => 100, 'is_admin' => true])->id,
++        ]);
++    }
++
++    public function test_hidden_for_everyone_when_movements_disabled(): void
++    {
++        Setting::updateSettings(['currency.server_movements_enabled' => '0', 'currency.server_movements_public' => '1']);
++
++        $this->assertFalse(CurrencyServerMovement::visibleTo($this->admin));
++        $this->assertFalse(CurrencyServerMovement::visibleTo($this->player));
++        $this->assertFalse(CurrencyServerMovement::visibleTo(null));
++    }
++
++    public function test_admin_only_by_default(): void
++    {
++        Setting::updateSettings(['currency.server_movements_enabled' => '1']);
++
++        $this->assertTrue(CurrencyServerMovement::visibleTo($this->admin));
++        $this->assertFalse(CurrencyServerMovement::visibleTo($this->player));
++        $this->assertFalse(CurrencyServerMovement::visibleTo(null));
++    }
++
++    public function test_public_setting_shows_to_players(): void
++    {
++        Setting::updateSettings(['currency.server_movements_enabled' => '1', 'currency.server_movements_public' => '1']);
++
++        $this->assertTrue(CurrencyServerMovement::visibleTo($this->player));
++        $this->assertTrue(CurrencyServerMovement::visibleTo($this->admin));
++    }
++
++    public function test_partial_renders_nothing_for_player(): void
++    {
++        Setting::updateSettings(['currency.server_movements_enabled' => '1']);
++
++        $this->actingAs($this->player);
++        $this->assertStringNotContainsString('Движение валют', view('profile._currency-movements')->render());
++
++        $this->actingAs($this->admin);
++        $this->assertStringContainsString('Движение валют', view('profile._currency-movements')->render());
++    }
++}
+-- 
+2.47.3
+
