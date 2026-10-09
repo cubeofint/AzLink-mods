@@ -1,0 +1,29 @@
+From 5c2175cd845975eccf52a659c306161f41c371b3 Mon Sep 17 00:00:00 2001
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Fri, 9 Oct 2026 11:57:02 +0500
+Subject: [PATCH] Movement type labels for player shop deals
+
+cointcore sends player_shop_buy / player_shop_sell movements from the
+player vending machine. Add their Russian labels to
+CurrencyServerMovement::TYPES so the movement history shows them instead
+of the raw type id. The site already accepts any type string.
+---
+ app/Models/CurrencyServerMovement.php | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/app/Models/CurrencyServerMovement.php b/app/Models/CurrencyServerMovement.php
+index 26f7723..d17970c 100644
+--- a/app/Models/CurrencyServerMovement.php
++++ b/app/Models/CurrencyServerMovement.php
+@@ -20,6 +20,8 @@ class CurrencyServerMovement extends Model
+         'trader_sell' => 'Продажа торговцу',
+         'admin_set' => 'Установка администратором',
+         'admin_add' => 'Начисление администратором',
++        'player_shop_buy' => 'Покупка в автомате игрока',
++        'player_shop_sell' => 'Продажа в автомат игрока',
+         'site_to_server' => 'С сайта на сервер',
+         'server_to_site' => 'С сервера на сайт',
+     ];
+-- 
+2.47.3
+
