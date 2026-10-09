@@ -1,0 +1,154 @@
+diff --git a/app/Support/HwidPanel.php b/app/Support/HwidPanel.php
+index fbe0c0f..53c62c4 100644
+--- a/app/Support/HwidPanel.php
++++ b/app/Support/HwidPanel.php
+@@ -25,6 +25,55 @@ class HwidPanel
+ 
+     private const MATCH_LIMIT = 100;
+ 
++    /** Public addresses of the site/launcher host itself (traffic seen from the local proxy). */
++    private const SERVER_IPS = ['114.129.9.184', '100.92.36.110'];
++
++    /** Virtual adapters that every Windows install reports (RAS "DEST"), never a hardware signal. */
++    private const VIRTUAL_MACS = ['444553544F53'];
++
++    /**
++     * Loopback, private (10/8, 172.16/12, 192.168/16, fc00::/7), CGNAT 100.64/10, link-local and reserved ranges,
++     * plus this server's own addresses: the IP was seen through the local proxy and identifies nobody.
++     */
++    public static function isProxyIp(?string $ip): bool
++    {
++        $ip = trim((string) $ip);
++
++        if ($ip === '') {
++            return true;
++        }
++
++        if (str_starts_with(strtolower($ip), '::ffff:') && filter_var(substr($ip, 7), FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
++            $ip = substr($ip, 7);
++        }
++
++        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
++            return true;
++        }
++
++        if (in_array($ip, self::SERVER_IPS, true)) {
++            return true;
++        }
++
++        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
++            $long = ip2long($ip);
++            if (($long & 0xFFC00000) === (ip2long('100.64.0.0') & 0xFFC00000)) {
++                return true;
++            }
++        } elseif (preg_match('/^fe[89ab]/i', $ip) === 1) {
++            return true;
++        }
++
++        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
++    }
++
++    public static function isVirtualMac(?string $mac): bool
++    {
++        $bare = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', (string) $mac) ?? '');
++
++        return $bare === '' || in_array($bare, self::VIRTUAL_MACS, true) || preg_match('/^(0+|F+)$/', $bare) === 1;
++    }
++
+     /** Normalized like LaunchServer HardwareIds: trim, drop spaces, upper case. */
+     public static function normalize(?string $value): ?string
+     {
+@@ -155,10 +204,25 @@ class HwidPanel
+ 
+     private static function loginStats(User $user): ?object
+     {
+-        return self::safe(fn () => DB::table('login_history')
++        $stats = self::safe(fn () => DB::table('login_history')
+             ->where('user_id', $user->id)
+-            ->selectRaw("COUNT(*) AS total, COUNT(DISTINCT ip) AS ips, SUM(source = 'launcher') AS launcher, SUM(source = 'site') AS site, SUM(result <> 'success') AS failed")
++            ->selectRaw("COUNT(*) AS total, SUM(source = 'launcher') AS launcher, SUM(source = 'site') AS site, SUM(result <> 'success') AS failed")
+             ->first());
++
++        if ($stats !== null) {
++            $stats->ips = self::safe(fn () => self::realIps($user)->count(), 0);
++        }
++
++        return $stats;
++    }
++
++    /** Distinct client IPs of the user without loopback/private/proxy addresses. */
++    private static function realIps(User $user): Collection
++    {
++        return DB::table('login_history')->where('user_id', $user->id)->whereNotNull('ip')->distinct()->limit(500)->pluck('ip')
++            ->push($user->last_login_ip)
++            ->filter(fn ($ip) => $ip !== null && ! self::isProxyIp($ip))
++            ->unique()->values();
+     }
+ 
+     /** @return array<int, array{user: object, signals: list<string>}> */
+@@ -200,6 +264,15 @@ class HwidPanel
+                 });
+             }
+ 
++            $macs = collect(self::json($hwid->macs ?? null))->filter(fn ($m) => ! self::isVirtualMac((string) $m))->unique()->take(20);
++            foreach ($macs as $mac) {
++                self::safe(function () use ($mac, $hwid, $add, $usersOnHwids) {
++                    $needle = '%"'.addcslashes((string) $mac, '%_\\').'"%';
++                    $ids = DB::table('hwids')->where('macs', 'like', $needle)->where('id', '<>', $hwid->id)->limit(self::MATCH_LIMIT)->pluck('id');
++                    $add($usersOnHwids($ids), 'MAC');
++                });
++            }
++
+             foreach (['system_uuid' => 'System UUID', 'machine_guid' => 'MachineGuid', 'device_tag' => 'device tag'] as $column => $label) {
+                 $value = $hwid->{$column} ?? null;
+                 if ($value === null || self::isPlaceholder($value)) {
+@@ -213,11 +286,7 @@ class HwidPanel
+         }
+ 
+         self::safe(function () use ($user, $add) {
+-            $ips = DB::table('login_history')->where('user_id', $user->id)->whereNotNull('ip')->distinct()->limit(200)->pluck('ip');
+-            if (! empty($user->last_login_ip)) {
+-                $ips->push($user->last_login_ip);
+-            }
+-            $ips = $ips->filter()->unique()->values();
++            $ips = self::realIps($user)->take(200);
+             if ($ips->isEmpty()) {
+                 return;
+             }
+diff --git a/resources/lang/ru/admin.php b/resources/lang/ru/admin.php
+index 9475497..05218c6 100755
+--- a/resources/lang/ru/admin.php
++++ b/resources/lang/ru/admin.php
+@@ -481,6 +481,10 @@ return [
+             'linked_accounts' => 'Другие учётные записи с этим HWID',
+             'linked_accounts_none' => 'Других учётных записей с этим HWID нет',
+             'placeholder' => 'заглушка',
++            'proxy_ip' => 'прокси/локальный',
++            'proxy_ip_hint' => 'Локальный, частный или адрес самого сервера: не учитывается в совпадениях и уникальных IP',
++            'virtual_mac' => 'виртуальный',
++            'virtual_mac_hint' => 'Виртуальный адаптер (RAS), не учитывается в совпадениях',
+             'placeholder_hint' => 'Типовое/пустое значение производителя — не уникально, по нему не сравниваем.',
+             'not_reported' => 'Новый отчёт лаунчера ещё не приходил — расширенные поля появятся после следующего входа.',
+             'disks' => 'Диски (все)',
+diff --git a/resources/views/admin/users/_hwid.blade.php b/resources/views/admin/users/_hwid.blade.php
+index 2cc9ae1..9fa6709 100644
+--- a/resources/views/admin/users/_hwid.blade.php
++++ b/resources/views/admin/users/_hwid.blade.php
+@@ -225,7 +225,7 @@
+                             <span class="hwid-field-label">{{ trans('admin.users.hwid.macs') }}</span>
+                             <span class="hwid-field-value font-monospace small">
+                                 @forelse($panel['macs'] as $mac)
+-                                    <span class="d-inline-block me-2">{{ implode(':', str_split(strtoupper((string) $mac), 2)) }}</span>
++                                    <span class="d-inline-block me-2 @if(\Azuriom\Support\HwidPanel::isVirtualMac((string) $mac)) text-muted @endif">{{ implode(':', str_split(strtoupper((string) $mac), 2)) }}@if(\Azuriom\Support\HwidPanel::isVirtualMac((string) $mac))<span class="badge text-bg-secondary ms-1 hwid-ph" title="{{ trans('admin.users.hwid.virtual_mac_hint') }}">{{ trans('admin.users.hwid.virtual_mac') }}</span>@endif</span>
+                                 @empty
+                                     —
+                                 @endforelse
+@@ -391,7 +391,7 @@
+                                     <td class="text-nowrap">{{ \Azuriom\Support\HwidPanel::time($login->created_at) }}</td>
+                                     <td><span class="badge {{ $login->source === 'launcher' ? 'text-bg-primary' : 'text-bg-secondary' }}">{{ $login->source === 'launcher' ? 'лаунчер' : ($login->source === 'site' ? 'сайт' : $login->source) }}</span></td>
+                                     <td><span class="badge {{ $login->result === 'success' || $login->result === 'ok' ? 'text-bg-success' : 'text-bg-danger' }}">{{ $login->result }}</span></td>
+-                                    <td class="font-monospace">{{ $login->ip ?? '—' }}</td>
++                                    <td class="font-monospace">@if($login->ip === null)—@elseif(\Azuriom\Support\HwidPanel::isProxyIp($login->ip))<span class="text-muted">{{ $login->ip }}</span><span class="badge text-bg-secondary ms-1 hwid-ph" title="{{ trans('admin.users.hwid.proxy_ip_hint') }}">{{ trans('admin.users.hwid.proxy_ip') }}</span>@else{{ $login->ip }}@endif</td>
+                                     <td>{{ $login->hwid_id ?? '—' }}</td>
+                                     <td class="text-truncate" style="max-width: 22rem" title="{{ $login->client }}">{{ $login->client ?? '—' }}</td>
+                                 </tr>
