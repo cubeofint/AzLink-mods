@@ -37,3 +37,18 @@ extensions, `login_history`); without it the panel degrades to the legacy fields
 - `resources/lang/ru/admin.php`: strings under `admin.users.hwid.*`.
 
 The existing HWID ban/unban buttons are unchanged.
+
+## 0002: proxy/local IPs and virtual MAC
+
+Apply on top of 0001. Launcher logins arrived as `127.0.0.1` (LaunchServer behind the local
+Caddy without `netty.trustedProxies`), so every account matched every other by IP.
+
+- `HwidPanel::isProxyIp()`: loopback, private (10/8, 172.16/12, 192.168/16, fc00::/7), CGNAT
+  100.64/10, link-local, reserved and the server's own addresses (`SERVER_IPS`). Such IPs are
+  excluded from IP matches and from the "unique IPs" count and shown greyed with
+  «прокси/локальный» in the login history.
+- `HwidPanel::isVirtualMac()`: RAS adapter `44:45:53:54:4F:53` (and all-zero/all-F) shown with
+  «виртуальный» and never used for matching. MAC matches (`hwids.macs`) added as a signal.
+- LaunchServer side: `netty.ipForwarding: true` and
+  `netty.trustedProxies: ["127.0.0.1", "::1", "0:0:0:0:0:0:0:1"]` (Java reports IPv6 loopback in
+  the long form), effective after a LaunchServer restart.
