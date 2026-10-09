@@ -1,0 +1,1015 @@
+diff --git a/app/Http/Controllers/Admin/HwidManageController.php b/app/Http/Controllers/Admin/HwidManageController.php
+new file mode 100644
+index 0000000..d6a7ab3
+--- /dev/null
++++ b/app/Http/Controllers/Admin/HwidManageController.php
+@@ -0,0 +1,113 @@
++<?php
++
++namespace Azuriom\Http\Controllers\Admin;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Models\User;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++
++class HwidManageController extends Controller
++{
++    /**
++     * Unlink the user from his HWID row (users.hwidId = NULL), optionally removing the launcher keys of that row.
++     */
++    public function unlink(Request $request, User $user)
++    {
++        $hwidId = $user->hwidId;
++
++        if ($hwidId === null) {
++            return to_route('admin.users.edit', $user)->with('error', trans('admin.users.hwid.actions.not_linked'));
++        }
++
++        $removeKeys = $request->boolean('remove_keys');
++        $admin = $request->user();
++
++        DB::transaction(function () use ($user, $hwidId, $removeKeys, $admin) {
++            $updated = DB::table('users')->where('id', $user->id)->where('hwidId', $hwidId)->update(['hwidId' => null]);
++
++            if ($updated === 0) {
++                return;
++            }
++
++            $this->log($hwidId, $user->id, 'unlink', [
++                'admin' => $admin->name,
++                'admin_id' => $admin->id,
++                'account' => $user->name,
++                'remove_keys' => $removeKeys,
++            ]);
++
++            if ($removeKeys) {
++                $this->removeKeys($hwidId, $user, $admin);
++            }
++        });
++
++        return to_route('admin.users.edit', $user)->with('success', trans('admin.users.hwid.actions.unlinked'));
++    }
++
++    /**
++     * Split another account off the HWID row shared with $user.
++     */
++    public function split(Request $request, User $user, User $other)
++    {
++        $hwidId = $user->hwidId;
++
++        if ($hwidId === null || $other->hwidId !== $hwidId || $other->is($user)) {
++            return to_route('admin.users.edit', $user)->with('error', trans('admin.users.hwid.actions.not_shared'));
++        }
++
++        $removeKeys = $request->boolean('remove_keys');
++        $admin = $request->user();
++
++        DB::transaction(function () use ($user, $other, $hwidId, $removeKeys, $admin) {
++            $updated = DB::table('users')->where('id', $other->id)->where('hwidId', $hwidId)->update(['hwidId' => null]);
++
++            if ($updated === 0) {
++                return;
++            }
++
++            $this->log($hwidId, $other->id, 'split', [
++                'admin' => $admin->name,
++                'admin_id' => $admin->id,
++                'account' => $other->name,
++                'from_user' => $user->name,
++                'reason' => 'admin split',
++                'remove_keys' => $removeKeys,
++            ]);
++
++            if ($removeKeys) {
++                $this->removeKeys($hwidId, $other, $admin);
++            }
++        });
++
++        return to_route('admin.users.edit', $user)->with('success', trans('admin.users.hwid.actions.split_done', ['user' => $other->name]));
++    }
++
++    private function removeKeys(int $hwidId, User $target, User $admin): void
++    {
++        $keyIds = DB::table('hwid_keys')->where('hwid_id', $hwidId)->pluck('id')->all();
++
++        DB::table('hwid_keys')->where('hwid_id', $hwidId)->delete();
++        DB::table('hwids')->where('id', $hwidId)->update(['publicKey' => null]);
++
++        $this->log($hwidId, $target->id, 'keys_removed', [
++            'admin' => $admin->name,
++            'admin_id' => $admin->id,
++            'removed_key_ids' => $keyIds,
++            'legacy_public_key_cleared' => true,
++        ]);
++    }
++
++    private function log(int $hwidId, int $userId, string $event, array $matched): void
++    {
++        DB::table('hwidLog')->insert([
++            'hwidId' => $hwidId,
++            'newPublicKey' => null,
++            'event' => $event,
++            'matched' => json_encode($matched, JSON_UNESCAPED_UNICODE),
++            'user_id' => $userId,
++            'ip' => null,
++            'created_at' => DB::raw('CURRENT_TIMESTAMP'),
++        ]);
++    }
++}
+diff --git a/app/Http/Controllers/Api/AuthController.php b/app/Http/Controllers/Api/AuthController.php
+index d21ad7f..a9d97e7 100755
+--- a/app/Http/Controllers/Api/AuthController.php
++++ b/app/Http/Controllers/Api/AuthController.php
+@@ -6,6 +6,7 @@ use Azuriom\Http\Controllers\Controller;
+ use Azuriom\Http\Resources\AuthenticatedUser as AuthenticatedUserResource;
+ use Azuriom\Models\ActionLog;
+ use Azuriom\Models\User;
++use Azuriom\Support\LoginHistory;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Arr;
+ use Illuminate\Support\Facades\Auth;
+@@ -55,6 +56,7 @@ class AuthController extends Controller
+ 
+         if (! Auth::validate($this->credentials($credentials))) {
+             RateLimiter::hit($throttleKey, self::LOGIN_DECAY_SECONDS);
++            LoginHistory::record(Auth::getLastAttempted()?->id, $request, 'fail');
+ 
+             return response()->json([
+                 'status' => 'error',
+@@ -122,6 +124,8 @@ class AuthController extends Controller
+             ],
+         ]);
+ 
++        LoginHistory::record($user->id, $request, 'success');
++
+         return new AuthenticatedUserResource($user, $plainToken);
+     }
+ 
+diff --git a/app/Http/Controllers/Auth/LoginController.php b/app/Http/Controllers/Auth/LoginController.php
+index 8d8f532..3853251 100755
+--- a/app/Http/Controllers/Auth/LoginController.php
++++ b/app/Http/Controllers/Auth/LoginController.php
+@@ -7,6 +7,7 @@ use Azuriom\Models\ActionLog;
+ use Azuriom\Models\User;
+ use Azuriom\Providers\RouteServiceProvider;
+ use Azuriom\Rules\TrustedEmailDomain;
++use Azuriom\Support\LoginHistory;
+ use Exception;
+ use Illuminate\Auth\AuthenticationException;
+ use Illuminate\Auth\Events\Registered;
+@@ -84,6 +85,7 @@ class LoginController extends Controller
+ 
+         if (! $this->guard()->once($this->credentials($request))) {
+             $this->incrementLoginAttempts($request);
++            $this->recordFailedLogin($request);
+ 
+             return $this->sendFailedLoginResponse($request);
+         }
+@@ -280,6 +282,8 @@ class LoginController extends Controller
+             '2fa' => $user->hasTwoFactorAuth() ? 'on' : 'off',
+         ]);
+ 
++        LoginHistory::record($user->id, $request, 'success');
++
+         if (game()->loginWithOAuth()) {
+             return;
+         }
+@@ -295,6 +299,22 @@ class LoginController extends Controller
+         }
+     }
+ 
++    /**
++     * Record a failed web login for an existing account (never throws).
++     */
++    protected function recordFailedLogin(Request $request): void
++    {
++        try {
++            $user = User::firstWhere(Arr::except($this->credentials($request), 'password'));
++
++            if ($user !== null) {
++                LoginHistory::record($user->id, $request, 'fail');
++            }
++        } catch (\Throwable $e) {
++            report($e);
++        }
++    }
++
+     /**
+      * Get the needed authorization credentials from the request.
+      */
+diff --git a/app/Support/HwidPanel.php b/app/Support/HwidPanel.php
+new file mode 100644
+index 0000000..fbe0c0f
+--- /dev/null
++++ b/app/Support/HwidPanel.php
+@@ -0,0 +1,253 @@
++<?php
++
++namespace Azuriom\Support;
++
++use Azuriom\Models\User;
++use Carbon\Carbon;
++use Illuminate\Support\Collection;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Log;
++use Illuminate\Support\Str;
++use Throwable;
++
++/**
++ * Data for the admin "HWID" block on the user page (hwids + hwid_keys + hwid_disks + hwidLog + login_history).
++ * Every section is fail-safe: a missing table/column never breaks the user page.
++ */
++class HwidPanel
++{
++    private const PLACEHOLDERS = [
++        'DEFAULTSTRING', 'TOBEFILLEDBYO.E.M.', 'TOBEFILLEDBYOEM', 'BSS-0123456789', 'NOTAPPLICABLE', 'NONE', 'NA', 'N/A',
++        'MB-1234567890', 'SYSTEMSERIALNUMBER', 'CHASSISSERIALNUMBER', 'BOARDSERIALNUMBER', 'DEFAULT', 'UNKNOWN', 'NULL',
++        'NOTSPECIFIED', 'SN-ON-THE-LABLE', 'SN-ON-THE-LABEL', '0123456789ABCDEF', '123456789', 'O.E.M', 'OEM', '0',
++        '03000200-0400-0500-0006-000700080009', 'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF', '00000000-0000-0000-0000-000000000000',
++    ];
++
++    private const MATCH_LIMIT = 100;
++
++    /** Normalized like LaunchServer HardwareIds: trim, drop spaces, upper case. */
++    public static function normalize(?string $value): ?string
++    {
++        if ($value === null) {
++            return null;
++        }
++
++        $value = Str::upper(str_replace(' ', '', trim($value)));
++
++        return $value === '' ? null : $value;
++    }
++
++    public static function isPlaceholder(?string $value): bool
++    {
++        $norm = self::normalize($value);
++
++        if ($norm === null) {
++            return true;
++        }
++
++        $stripped = str_replace('-', '', $norm);
++        foreach (self::PLACEHOLDERS as $placeholder) {
++            if ($norm === $placeholder || $stripped === str_replace('-', '', $placeholder)) {
++                return true;
++            }
++        }
++
++        if (strlen($norm) < 8) {
++            return true;
++        }
++
++        $bare = preg_replace('/[-_.]/', '', $norm) ?? $norm;
++
++        if ($bare === '' || preg_match('/^[0F]+$/', $bare) === 1 || preg_match('/^(.)\1*$/', $bare) === 1 || preg_match('/^0+[0-9]$/', $bare) === 1) {
++            return true;
++        }
++
++        // NVMe EUI-like ids that are mostly zeros (0000_0000_0000_0000_4868_3400_0000_0000.)
++        return strlen($bare) >= 12 && substr_count($bare, '0') >= strlen($bare) * 0.6;
++    }
++
++    public static function json(?string $value): array
++    {
++        if ($value === null || $value === '') {
++            return [];
++        }
++
++        $decoded = json_decode($value, true);
++
++        return is_array($decoded) ? array_values(array_filter($decoded, fn ($v) => is_scalar($v) && (string) $v !== '')) : [];
++    }
++
++    public static function time(?string $value): ?string
++    {
++        if ($value === null || $value === '') {
++            return null;
++        }
++
++        try {
++            // TIMESTAMP columns come back in the DB session zone (server: UTC)
++            return Carbon::parse($value, 'UTC')->setTimezone(config('app.timezone'))->format('d.m.Y H:i:s');
++        } catch (Throwable) {
++            return $value;
++        }
++    }
++
++    public static function forUser(User $user, int $perPage = 25): array
++    {
++        $hwid = self::safe(fn () => $user->hwidId ? DB::table('hwids')->where('id', $user->hwidId)->first() : null);
++
++        return [
++            'hwid' => $hwid,
++            'extended' => $hwid !== null && property_exists($hwid, 'system_uuid'),
++            'disks' => $hwid ? self::json($hwid->disk_serials ?? null) : [],
++            'macs' => $hwid ? self::json($hwid->macs ?? null) : [],
++            'monitors' => $hwid ? self::json($hwid->monitor_serials ?? null) : [],
++            'keys' => $hwid ? self::keys($hwid->id) : null,
++            'log' => self::log($user),
++            'logins' => self::logins($user, $perPage),
++            'loginStats' => self::loginStats($user),
++            'matches' => self::matches($user, $hwid),
++        ];
++    }
++
++    private static function keys(int $hwidId): ?object
++    {
++        return self::safe(fn () => DB::table('hwid_keys')
++            ->where('hwid_id', $hwidId)
++            ->selectRaw('COUNT(*) AS total, MAX(last_seen_at) AS last_seen, MIN(created_at) AS first_seen')
++            ->first());
++    }
++
++    private static function log(User $user): Collection
++    {
++        return self::safe(function () use ($user) {
++            $query = DB::table('hwidLog AS l')
++                ->leftJoin('users AS u', 'u.id', '=', 'l.user_id')
++                ->select('l.id', 'l.hwidId', 'l.event', 'l.score', 'l.matched', 'l.user_id', 'l.ip', 'l.created_at', 'u.name AS user_name')
++                ->where(function ($q) use ($user) {
++                    $q->where('l.user_id', $user->id);
++                    if ($user->hwidId) {
++                        $q->orWhere('l.hwidId', $user->hwidId);
++                    }
++                })
++                ->orderByDesc('l.id')
++                ->limit(50);
++
++            return $query->get()->map(function ($row) {
++                $decoded = $row->matched ? json_decode($row->matched, true) : null;
++                $row->matched_pretty = $decoded !== null
++                    ? json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
++                    : $row->matched;
++
++                return $row;
++            });
++        }, collect());
++    }
++
++    private static function logins(User $user, int $perPage)
++    {
++        return self::safe(fn () => DB::table('login_history')
++            ->where('user_id', $user->id)
++            ->orderByDesc('id')
++            ->paginate($perPage, ['*'], 'lh_page')
++            ->withQueryString()
++            ->fragment('userHwidLogins'));
++    }
++
++    private static function loginStats(User $user): ?object
++    {
++        return self::safe(fn () => DB::table('login_history')
++            ->where('user_id', $user->id)
++            ->selectRaw("COUNT(*) AS total, COUNT(DISTINCT ip) AS ips, SUM(source = 'launcher') AS launcher, SUM(source = 'site') AS site, SUM(result <> 'success') AS failed")
++            ->first());
++    }
++
++    /** @return array<int, array{user: object, signals: list<string>}> */
++    private static function matches(User $user, ?object $hwid): array
++    {
++        $signals = [];
++
++        $add = function (iterable $users, string $signal) use (&$signals, $user) {
++            foreach ($users as $row) {
++                if ((int) $row->id === (int) $user->id) {
++                    continue;
++                }
++                $signals[$row->id]['user'] = $row;
++                $signals[$row->id]['signals'][$signal] = true;
++            }
++        };
++
++        $usersOnHwids = function (Collection $hwidIds) {
++            $ids = $hwidIds->filter()->unique()->take(self::MATCH_LIMIT);
++
++            return $ids->isEmpty() ? collect() : DB::table('users')->whereIn('hwidId', $ids)->limit(self::MATCH_LIMIT)
++                ->get(['id', 'name', 'hwidId', 'is_banned', 'deleted_at']);
++        };
++
++        if ($hwid !== null) {
++            self::safe(fn () => $add($usersOnHwids(collect([$hwid->id])), 'тот же HWID'));
++
++            $serials = collect(self::json($hwid->disk_serials ?? null))
++                ->push($hwid->hwDiskId ?? null)
++                ->map(fn ($s) => self::normalize($s))
++                ->filter(fn ($s) => $s !== null && ! self::isPlaceholder($s))
++                ->unique()->values();
++
++            if ($serials->isNotEmpty()) {
++                self::safe(function () use ($serials, $hwid, $add, $usersOnHwids) {
++                    $ids = DB::table('hwid_disks')->whereIn('serial', $serials)->where('hwid_id', '<>', $hwid->id)
++                        ->limit(self::MATCH_LIMIT)->pluck('hwid_id');
++                    $add($usersOnHwids($ids), 'диск');
++                });
++            }
++
++            foreach (['system_uuid' => 'System UUID', 'machine_guid' => 'MachineGuid', 'device_tag' => 'device tag'] as $column => $label) {
++                $value = $hwid->{$column} ?? null;
++                if ($value === null || self::isPlaceholder($value)) {
++                    continue;
++                }
++                self::safe(function () use ($column, $value, $hwid, $add, $usersOnHwids, $label) {
++                    $ids = DB::table('hwids')->where($column, $value)->where('id', '<>', $hwid->id)->limit(self::MATCH_LIMIT)->pluck('id');
++                    $add($usersOnHwids($ids), $label);
++                });
++            }
++        }
++
++        self::safe(function () use ($user, $add) {
++            $ips = DB::table('login_history')->where('user_id', $user->id)->whereNotNull('ip')->distinct()->limit(200)->pluck('ip');
++            if (! empty($user->last_login_ip)) {
++                $ips->push($user->last_login_ip);
++            }
++            $ips = $ips->filter()->unique()->values();
++            if ($ips->isEmpty()) {
++                return;
++            }
++            $fromHistory = DB::table('login_history')->whereIn('ip', $ips)->where('user_id', '<>', $user->id)
++                ->whereNotNull('user_id')->distinct()->limit(self::MATCH_LIMIT)->pluck('user_id');
++            $rows = DB::table('users')
++                ->where(fn ($q) => $q->whereIn('id', $fromHistory)->orWhereIn('last_login_ip', $ips))
++                ->limit(self::MATCH_LIMIT)
++                ->get(['id', 'name', 'hwidId', 'is_banned', 'deleted_at']);
++            $add($rows, 'IP');
++        });
++
++        $result = [];
++        foreach ($signals as $id => $entry) {
++            $result[] = ['user' => $entry['user'], 'signals' => array_keys($entry['signals'])];
++        }
++
++        usort($result, fn ($a, $b) => [count($b['signals']), $a['user']->name] <=> [count($a['signals']), $b['user']->name]);
++
++        return $result;
++    }
++
++    private static function safe(callable $callback, mixed $default = null): mixed
++    {
++        try {
++            return $callback();
++        } catch (Throwable $e) {
++            Log::warning('[hwid-panel] '.$e->getMessage());
++
++            return $default;
++        }
++    }
++}
+diff --git a/app/Support/LoginHistory.php b/app/Support/LoginHistory.php
+new file mode 100644
+index 0000000..a8b2c07
+--- /dev/null
++++ b/app/Support/LoginHistory.php
+@@ -0,0 +1,36 @@
++<?php
++
++namespace Azuriom\Support;
++
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Log;
++use Illuminate\Support\Str;
++use Throwable;
++
++/**
++ * Writes site logins into login_history (shared with LaunchServer, source = 'site').
++ * Never throws: a logging problem must not break the login itself.
++ */
++class LoginHistory
++{
++    public static function record(?int $userId, Request $request, string $result, string $source = 'site'): void
++    {
++        if ($userId === null) {
++            return;
++        }
++
++        try {
++            DB::table('login_history')->insert([
++                'user_id' => $userId,
++                'source' => Str::limit($source, 16, ''),
++                'ip' => Str::limit((string) $request->ip(), 45, '') ?: null,
++                'client' => Str::limit((string) $request->userAgent(), 255, '') ?: null,
++                'hwid_id' => null,
++                'result' => Str::limit($result, 16, ''),
++            ]);
++        } catch (Throwable $e) {
++            Log::warning('[login-history] not written: '.$e->getMessage());
++        }
++    }
++}
+diff --git a/resources/lang/ru/admin.php b/resources/lang/ru/admin.php
+index 84c4fd2..9475497 100755
+--- a/resources/lang/ru/admin.php
++++ b/resources/lang/ru/admin.php
+@@ -480,6 +480,55 @@ return [
+             'unban_success' => 'HWID разблокирован.',
+             'linked_accounts' => 'Другие учётные записи с этим HWID',
+             'linked_accounts_none' => 'Других учётных записей с этим HWID нет',
++            'placeholder' => 'заглушка',
++            'placeholder_hint' => 'Типовое/пустое значение производителя — не уникально, по нему не сравниваем.',
++            'not_reported' => 'Новый отчёт лаунчера ещё не приходил — расширенные поля появятся после следующего входа.',
++            'disks' => 'Диски (все)',
++            'system_uuid' => 'System UUID',
++            'bios_serial' => 'Серийник BIOS',
++            'macs' => 'MAC-адреса',
++            'machine_guid' => 'MachineGuid (Windows)',
++            'gpu_ids' => 'ID видеокарт',
++            'monitors' => 'Мониторы (EDID)',
++            'device_tag' => 'Метка устройства',
++            'last_report' => 'Последний отчёт',
++            'spoof_score' => 'Подозрение на подмену',
++            'keys' => 'Ключи лаунчера',
++            'keys_value' => ':count шт., последний вход по ключу: :last',
++            'copy' => 'Скопировать',
++            'log_title' => 'Журнал HWID',
++            'log_hint' => 'Последние 50 событий по этой записи HWID и по этому аккаунту.',
++            'log_empty' => 'Событий нет.',
++            'logins_title' => 'История входов',
++            'logins_stats' => 'Всего: :total · уникальных IP: :ips · лаунчер: :launcher · сайт: :site · неудачных: :failed',
++            'logins_empty' => 'Входов пока не записано.',
++            'matches_title' => 'Совпадения',
++            'matches_hint' => 'Аккаунты с тем же HWID, диском, System UUID, MachineGuid, меткой устройства или IP. Заглушки не учитываются.',
++            'matches_empty' => 'Совпадений не найдено.',
++            'col' => [
++                'time' => 'Время',
++                'event' => 'Событие',
++                'score' => 'Оценка',
++                'details' => 'Детали',
++                'user' => 'Аккаунт',
++                'source' => 'Источник',
++                'ip' => 'IP',
++                'client' => 'Клиент',
++                'result' => 'Результат',
++                'signals' => 'Совпало',
++            ],
++            'actions' => [
++                'unlink' => 'Отвязать HWID',
++                'unlink_confirm' => 'Отвязать этот аккаунт от записи HWID? При следующем входе лаунчер привяжет его заново по железу/ключу.',
++                'split' => 'Разделить',
++                'split_confirm' => 'Отделить этот аккаунт от общей записи HWID?',
++                'remove_keys' => 'удалить ключи лаунчера этой записи',
++                'remove_keys_hint' => 'Иначе лаунчер может привязать аккаунт обратно по ключу.',
++                'unlinked' => 'Аккаунт отвязан от HWID.',
++                'split_done' => 'Аккаунт :user отделён от HWID.',
++                'not_linked' => 'Аккаунт не привязан к HWID.',
++                'not_shared' => 'Этот аккаунт не делит HWID с текущим.',
++            ],
+         ],
+ 
+         'coins_global_info' => 'Глобальный кошелёк на сайте. Начисления с Minecraft попадают в балансы серверов ниже.',
+diff --git a/resources/views/admin/users/_hwid.blade.php b/resources/views/admin/users/_hwid.blade.php
+index f8172f2..2cc9ae1 100644
+--- a/resources/views/admin/users/_hwid.blade.php
++++ b/resources/views/admin/users/_hwid.blade.php
+@@ -1,4 +1,22 @@
+-<div class="card shadow mb-4">
++@php
++    $panel = \Azuriom\Support\HwidPanel::forUser($user);
++    $hw = $panel['hwid'];
++    $isPh = fn ($v) => \Azuriom\Support\HwidPanel::isPlaceholder($v);
++    $phBadge = '<span class="badge text-bg-secondary ms-1 hwid-ph" title="'.e(trans('admin.users.hwid.placeholder_hint')).'" data-bs-toggle="tooltip">'.e(trans('admin.users.hwid.placeholder')).'</span>';
++    $hwidAccounts = $user->hwid ? $user->hwid->users->where('id', '!=', $user->id)->sortBy('name') : collect();
++    $openLogins = request()->has('lh_page');
++    $spoof = $hw->spoof_score ?? null;
++    $spoofClass = $spoof === null ? '' : ($spoof < 0.3 ? 'text-success' : ($spoof < 0.6 ? 'text-warning' : 'text-danger'));
++    $eventClass = fn ($e) => match ($e) {
++        'create', 'key_added', 'report_ok', 'report' => 'text-bg-success',
++        'merge', 'report_mismatch' => 'text-bg-warning',
++        'reject', 'banned', 'spoof' => 'text-bg-danger',
++        'split', 'unlink', 'keys_removed' => 'text-bg-info',
++        default => 'text-bg-secondary',
++    };
++@endphp
++
++<div class="card shadow mb-4" id="userHwidCard">
+     <div class="card-header py-2 d-flex align-items-center justify-content-between gap-2 flex-wrap">
+         <h5 class="card-title mb-0">
+             <i class="bi bi-pc-display me-2"></i>{{ trans('admin.users.hwid.title') }}
+@@ -24,16 +42,27 @@
+                         </button>
+                     </form>
+                 @endif
++
++                <form method="POST" action="{{ route('admin.users.hwid.unlink', $user) }}" class="mb-0 d-flex align-items-center gap-2" onsubmit="return confirm(@json(trans('admin.users.hwid.actions.unlink_confirm')))">
++                    @csrf
++                    <div class="form-check form-check-inline small mb-0 me-0" title="{{ trans('admin.users.hwid.actions.remove_keys_hint') }}" data-bs-toggle="tooltip">
++                        <input class="form-check-input" type="checkbox" name="remove_keys" value="1" id="hwidUnlinkKeys">
++                        <label class="form-check-label" for="hwidUnlinkKeys">{{ trans('admin.users.hwid.actions.remove_keys') }}</label>
++                    </div>
++                    <button type="submit" class="btn btn-sm btn-outline-warning">
++                        <i class="bi bi-link-45deg"></i> {{ trans('admin.users.hwid.actions.unlink') }}
++                    </button>
++                </form>
+             @endif
+ 
+-            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="collapse" data-bs-target="#userHwidCollapse" aria-expanded="{{ ($user->hwid && $user->hwid->banned) ? 'true' : 'false' }}">
++            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="collapse" data-bs-target="#userHwidCollapse" aria-expanded="{{ ($user->hwid && $user->hwid->banned) || $openLogins ? 'true' : 'false' }}">
+                 {{ trans('admin.users.toggle_section') }}
+             </button>
+         </div>
+     </div>
+-    <div class="collapse{{ ($user->hwid && $user->hwid->banned) ? ' show' : '' }}" id="userHwidCollapse">
++    <div class="collapse{{ ($user->hwid && $user->hwid->banned) || $openLogins ? ' show' : '' }}" id="userHwidCollapse">
+     <div class="card-body py-3">
+-        @if($user->hwid)
++        @if($user->hwid && $hw)
+             @if($user->hwid->banned)
+                 <div class="alert alert-danger py-1 px-2 small mb-2 mb-md-3" role="alert">
+                     <i class="bi bi-exclamation-triangle"></i> {{ trans('admin.users.hwid.banned') }}
+@@ -48,17 +77,54 @@
+                 </div>
+             @endif
+ 
++            @if($panel['extended'] && empty($hw->last_report_at))
++                <div class="alert alert-secondary py-1 px-2 small mb-2 mb-md-3" role="alert">
++                    <i class="bi bi-info-circle"></i> {{ trans('admin.users.hwid.not_reported') }}
++                </div>
++            @endif
++
+             <div class="row g-2 g-md-3">
+                 <div class="col-6 col-md-4 col-lg-2">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.id') }}</span>
+-                        <span class="hwid-field-value">{{ $user->hwid->id }}</span>
++                        <span class="hwid-field-value">{{ $hw->id }}</span>
++                    </div>
++                </div>
++                <div class="col-6 col-md-4 col-lg-3">
++                    <div class="hwid-field">
++                        <span class="hwid-field-label">{{ trans('admin.users.hwid.last_report') }}</span>
++                        <span class="hwid-field-value">{{ \Azuriom\Support\HwidPanel::time($hw->last_report_at ?? null) ?? '—' }}</span>
++                    </div>
++                </div>
++                <div class="col-6 col-md-4 col-lg-2">
++                    <div class="hwid-field">
++                        <span class="hwid-field-label">{{ trans('admin.users.hwid.spoof_score') }}</span>
++                        <span class="hwid-field-value {{ $spoofClass }}">{{ $spoof === null ? '—' : number_format((float) $spoof, 2) }}</span>
++                    </div>
++                </div>
++                <div class="col-6 col-md-12 col-lg-5">
++                    <div class="hwid-field">
++                        <span class="hwid-field-label">{{ trans('admin.users.hwid.keys') }}</span>
++                        <span class="hwid-field-value">
++                            @if($panel['keys'])
++                                {{ trans('admin.users.hwid.keys_value', ['count' => $panel['keys']->total, 'last' => \Azuriom\Support\HwidPanel::time($panel['keys']->last_seen) ?? '—']) }}
++                            @else
++                                —
++                            @endif
++                        </span>
+                     </div>
+                 </div>
++
+                 <div class="col-12 col-md-8 col-lg-4">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.gpu') }}</span>
+-                        <span class="hwid-field-value">{{ $user->hwid->graphicCard ?? trans('messages.unknown') }}</span>
++                        <span class="hwid-field-value">{{ $hw->graphicCard ?? trans('messages.unknown') }}</span>
++                    </div>
++                </div>
++                <div class="col-12 col-md-4 col-lg-4">
++                    <div class="hwid-field">
++                        <span class="hwid-field-label">{{ trans('admin.users.hwid.gpu_ids') }}</span>
++                        <span class="hwid-field-value font-monospace small">{{ $hw->gpu_ids ?? '—' }}</span>
+                     </div>
+                 </div>
+                 <div class="col-6 col-md-4 col-lg-2">
+@@ -73,45 +139,114 @@
+                         <span class="hwid-field-value">{{ $user->hwid->formattedProcessorFreq() ?? trans('messages.unknown') }}</span>
+                     </div>
+                 </div>
+-                <div class="col-6 col-md-4 col-lg-1">
++                <div class="col-6 col-md-3 col-lg-2">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.logical_cpus') }}</span>
+-                        <span class="hwid-field-value">{{ $user->hwid->logicalProcessors ?? '—' }}</span>
++                        <span class="hwid-field-value">{{ $hw->logicalProcessors ?? '—' }}</span>
+                     </div>
+                 </div>
+-                <div class="col-6 col-md-4 col-lg-1">
++                <div class="col-6 col-md-3 col-lg-2">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.physical_cpus') }}</span>
+-                        <span class="hwid-field-value">{{ $user->hwid->physicalProcessors ?? '—' }}</span>
++                        <span class="hwid-field-value">{{ $hw->physicalProcessors ?? '—' }}</span>
+                     </div>
+                 </div>
+-                <div class="col-6 col-md-4 col-lg-2">
++                <div class="col-6 col-md-3 col-lg-2">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.os_bitness') }}</span>
+-                        <span class="hwid-field-value">{{ $user->hwid->bitness ? $user->hwid->bitness.'-bit' : trans('messages.unknown') }}</span>
++                        <span class="hwid-field-value">{{ $hw->bitness ? $hw->bitness.'-bit' : trans('messages.unknown') }}</span>
+                     </div>
+                 </div>
+-                <div class="col-6 col-md-4 col-lg-2">
++                <div class="col-6 col-md-3 col-lg-2">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.battery') }}</span>
+-                        <span class="hwid-field-value {{ $user->hwid->battery ? 'text-warning' : '' }}">{{ $user->hwid->battery ? trans('messages.yes') : trans('messages.no') }}</span>
++                        <span class="hwid-field-value {{ $hw->battery ? 'text-warning' : '' }}">{{ $hw->battery ? trans('messages.yes') : trans('messages.no') }}</span>
+                     </div>
+                 </div>
++
+                 <div class="col-12 col-md-6">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.disk') }}</span>
+-                        <span class="hwid-field-value font-monospace">{{ $user->hwid->trimmedDiskId() ?? trans('messages.unknown') }}</span>
++                        <span class="hwid-field-value font-monospace">{{ $user->hwid->trimmedDiskId() ?? trans('messages.unknown') }}@if($user->hwid->trimmedDiskId() && $isPh($hw->hwDiskId)){!! $phBadge !!}@endif</span>
+                     </div>
+                 </div>
+                 <div class="col-12 col-md-6">
+                     <div class="hwid-field">
+                         <span class="hwid-field-label">{{ trans('admin.users.hwid.motherboard') }}</span>
+-                        <span class="hwid-field-value font-monospace">{{ $user->hwid->baseboardSerialNumber ?? trans('messages.unknown') }}</span>
++                        <span class="hwid-field-value font-monospace">{{ $hw->baseboardSerialNumber ?? trans('messages.unknown') }}@if($hw->baseboardSerialNumber !== null && $isPh($hw->baseboardSerialNumber)){!! $phBadge !!}@endif</span>
+                     </div>
+                 </div>
+-            </div>
+ 
+-            @php($hwidAccounts = $user->hwid->users->where('id', '!=', $user->id)->sortBy('name'))
++                @if($panel['extended'])
++                    <div class="col-12 col-md-6">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.disks') }}</span>
++                            <span class="hwid-field-value font-monospace">
++                                @forelse($panel['disks'] as $disk)
++                                    <span class="d-block">{{ $disk }}@if($isPh($disk)){!! $phBadge !!}@endif</span>
++                                @empty
++                                    —
++                                @endforelse
++                            </span>
++                        </div>
++                    </div>
++                    <div class="col-12 col-md-6">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.monitors') }}</span>
++                            <span class="hwid-field-value font-monospace">
++                                @forelse($panel['monitors'] as $monitor)
++                                    <span class="d-block">{{ $monitor }}@if($isPh($monitor)){!! $phBadge !!}@endif</span>
++                                @empty
++                                    —
++                                @endforelse
++                            </span>
++                        </div>
++                    </div>
++                    <div class="col-12 col-md-6 col-lg-4">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.system_uuid') }}</span>
++                            <span class="hwid-field-value font-monospace small">{{ $hw->system_uuid ?? '—' }}@if($hw->system_uuid !== null && $isPh($hw->system_uuid)){!! $phBadge !!}@endif</span>
++                        </div>
++                    </div>
++                    <div class="col-12 col-md-6 col-lg-4">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.machine_guid') }}</span>
++                            <span class="hwid-field-value font-monospace small">{{ $hw->machine_guid ?? '—' }}@if($hw->machine_guid !== null && $isPh($hw->machine_guid)){!! $phBadge !!}@endif</span>
++                        </div>
++                    </div>
++                    <div class="col-12 col-md-6 col-lg-4">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.bios_serial') }}</span>
++                            <span class="hwid-field-value font-monospace small">{{ $hw->bios_serial ?? '—' }}@if($hw->bios_serial !== null && $isPh($hw->bios_serial)){!! $phBadge !!}@endif</span>
++                        </div>
++                    </div>
++                    <div class="col-12 col-md-6">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.macs') }}</span>
++                            <span class="hwid-field-value font-monospace small">
++                                @forelse($panel['macs'] as $mac)
++                                    <span class="d-inline-block me-2">{{ implode(':', str_split(strtoupper((string) $mac), 2)) }}</span>
++                                @empty
++                                    —
++                                @endforelse
++                            </span>
++                        </div>
++                    </div>
++                    <div class="col-12 col-md-6">
++                        <div class="hwid-field">
++                            <span class="hwid-field-label">{{ trans('admin.users.hwid.device_tag') }}</span>
++                            <span class="hwid-field-value font-monospace small">
++                                @if($hw->device_tag)
++                                    <span title="{{ $hw->device_tag }}">{{ \Illuminate\Support\Str::limit($hw->device_tag, 16, '…') }}</span>
++                                    <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" title="{{ trans('admin.users.hwid.copy') }}" data-copy="{{ $hw->device_tag }}" onclick="navigator.clipboard.writeText(this.dataset.copy)"><i class="bi bi-clipboard"></i></button>
++                                @else
++                                    —
++                                @endif
++                            </span>
++                        </div>
++                    </div>
++                @endif
++            </div>
+ 
+             <div class="hwid-linked mt-3 pt-2 border-top">
+                 <span class="hwid-field-label d-block mb-2">{{ trans('admin.users.hwid.linked_accounts') }}</span>
+@@ -119,17 +254,25 @@
+                 @if($hwidAccounts->isNotEmpty())
+                     <div class="d-flex flex-wrap gap-2">
+                         @foreach($hwidAccounts as $linkedUser)
+-                            <a href="{{ route('admin.users.edit', $linkedUser) }}" class="hwid-linked-user text-decoration-none">
+-                                <span class="hwid-linked-user-id">#{{ $linkedUser->id }}</span>
+-                                <span class="hwid-linked-user-name">{{ $linkedUser->name }}</span>
+-                                <span class="badge" style="{{ $linkedUser->role->getBadgeStyle() }}">{{ $linkedUser->role->name }}</span>
+-                                @if($linkedUser->isDeleted())
+-                                    <i class="bi bi-person-x text-secondary" title="{{ trans('admin.users.deleted') }}" data-bs-toggle="tooltip"></i>
+-                                @endif
+-                                @if($linkedUser->isBanned())
+-                                    <i class="bi bi-slash-circle text-danger" title="{{ trans('admin.users.banned') }}" data-bs-toggle="tooltip"></i>
+-                                @endif
+-                            </a>
++                            <span class="hwid-linked-user">
++                                <a href="{{ route('admin.users.edit', $linkedUser) }}" class="text-decoration-none d-inline-flex align-items-center gap-1 text-reset">
++                                    <span class="hwid-linked-user-id">#{{ $linkedUser->id }}</span>
++                                    <span class="hwid-linked-user-name">{{ $linkedUser->name }}</span>
++                                    <span class="badge" style="{{ $linkedUser->role->getBadgeStyle() }}">{{ $linkedUser->role->name }}</span>
++                                    @if($linkedUser->isDeleted())
++                                        <i class="bi bi-person-x text-secondary" title="{{ trans('admin.users.deleted') }}" data-bs-toggle="tooltip"></i>
++                                    @endif
++                                    @if($linkedUser->isBanned())
++                                        <i class="bi bi-slash-circle text-danger" title="{{ trans('admin.users.banned') }}" data-bs-toggle="tooltip"></i>
++                                    @endif
++                                </a>
++                                <form method="POST" action="{{ route('admin.users.hwid.split', [$user, $linkedUser]) }}" class="d-inline mb-0" onsubmit="return confirm(@json(trans('admin.users.hwid.actions.split_confirm').' '.$linkedUser->name))">
++                                    @csrf
++                                    <button type="submit" class="btn btn-sm btn-outline-info py-0 px-1 ms-1" title="{{ trans('admin.users.hwid.actions.split') }}" data-bs-toggle="tooltip">
++                                        <i class="bi bi-scissors"></i>
++                                    </button>
++                                </form>
++                            </span>
+                         @endforeach
+                     </div>
+                 @else
+@@ -139,6 +282,129 @@
+         @else
+             <p class="text-muted small mb-0">{{ trans('admin.users.hwid.none') }}</p>
+         @endif
++
++        {{-- Совпадения --}}
++        <div class="mt-3 pt-2 border-top">
++            <span class="hwid-field-label d-block mb-1">{{ trans('admin.users.hwid.matches_title') }} ({{ count($panel['matches']) }})</span>
++            <p class="text-muted small mb-2">{{ trans('admin.users.hwid.matches_hint') }}</p>
++            @if(count($panel['matches']) > 0)
++                <div class="d-flex flex-wrap gap-2">
++                    @foreach($panel['matches'] as $match)
++                        <a href="{{ route('admin.users.edit', $match['user']->id) }}" class="hwid-linked-user text-decoration-none">
++                            <span class="hwid-linked-user-id">#{{ $match['user']->id }}</span>
++                            <span class="hwid-linked-user-name">{{ $match['user']->name }}</span>
++                            @foreach($match['signals'] as $signal)
++                                <span class="badge {{ $signal === 'IP' ? 'text-bg-secondary' : 'text-bg-primary' }}">{{ $signal }}</span>
++                            @endforeach
++                            @if($match['user']->is_banned)
++                                <i class="bi bi-slash-circle text-danger"></i>
++                            @endif
++                            @if($match['user']->deleted_at)
++                                <i class="bi bi-person-x text-secondary"></i>
++                            @endif
++                        </a>
++                    @endforeach
++                </div>
++            @else
++                <p class="text-muted small mb-0">{{ trans('admin.users.hwid.matches_empty') }}</p>
++            @endif
++        </div>
++
++        {{-- Журнал HWID --}}
++        <div class="mt-3 pt-2 border-top">
++            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="collapse" data-bs-target="#userHwidLog" aria-expanded="false">
++                <i class="bi bi-journal-text"></i> {{ trans('admin.users.hwid.log_title') }} ({{ $panel['log']->count() }})
++            </button>
++            <div class="collapse mt-2" id="userHwidLog">
++                <p class="text-muted small mb-2">{{ trans('admin.users.hwid.log_hint') }}</p>
++                @if($panel['log']->isNotEmpty())
++                    <div class="table-responsive">
++                        <table class="table table-sm table-striped align-middle small mb-0">
++                            <thead>
++                            <tr>
++                                <th>{{ trans('admin.users.hwid.col.time') }}</th>
++                                <th>{{ trans('admin.users.hwid.col.event') }}</th>
++                                <th>HWID</th>
++                                <th>{{ trans('admin.users.hwid.col.score') }}</th>
++                                <th>{{ trans('admin.users.hwid.col.user') }}</th>
++                                <th>{{ trans('admin.users.hwid.col.details') }}</th>
++                            </tr>
++                            </thead>
++                            <tbody>
++                            @foreach($panel['log'] as $row)
++                                <tr>
++                                    <td class="text-nowrap">{{ \Azuriom\Support\HwidPanel::time($row->created_at) ?? '—' }}</td>
++                                    <td><span class="badge {{ $eventClass($row->event) }}">{{ $row->event ?? 'create' }}</span></td>
++                                    <td>{{ $row->hwidId }}</td>
++                                    <td>{{ $row->score === null ? '—' : number_format((float) $row->score, 2) }}</td>
++                                    <td>
++                                        @if($row->user_id && $row->user_name)
++                                            <a href="{{ route('admin.users.edit', $row->user_id) }}">{{ $row->user_name }}</a>
++                                        @else
++                                            —
++                                        @endif
++                                    </td>
++                                    <td>
++                                        @if($row->matched_pretty)
++                                            <details>
++                                                <summary class="text-muted">JSON</summary>
++                                                <pre class="hwid-json mb-0">{{ $row->matched_pretty }}</pre>
++                                            </details>
++                                        @else
++                                            —
++                                        @endif
++                                    </td>
++                                </tr>
++                            @endforeach
++                            </tbody>
++                        </table>
++                    </div>
++                @else
++                    <p class="text-muted small mb-0">{{ trans('admin.users.hwid.log_empty') }}</p>
++                @endif
++            </div>
++        </div>
++
++        {{-- История входов --}}
++        <div class="mt-3 pt-2 border-top" id="userHwidLogins">
++            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="collapse" data-bs-target="#userHwidLoginsBody" aria-expanded="{{ $openLogins ? 'true' : 'false' }}">
++                <i class="bi bi-box-arrow-in-right"></i> {{ trans('admin.users.hwid.logins_title') }} ({{ $panel['loginStats']->total ?? 0 }})
++            </button>
++            <div class="collapse mt-2{{ $openLogins ? ' show' : '' }}" id="userHwidLoginsBody">
++                @if($panel['loginStats'] && $panel['loginStats']->total > 0 && $panel['logins'])
++                    <p class="text-muted small mb-2">{{ trans('admin.users.hwid.logins_stats', ['total' => $panel['loginStats']->total, 'ips' => $panel['loginStats']->ips, 'launcher' => (int) $panel['loginStats']->launcher, 'site' => (int) $panel['loginStats']->site, 'failed' => (int) $panel['loginStats']->failed]) }}</p>
++                    <div class="table-responsive">
++                        <table class="table table-sm table-striped align-middle small mb-2">
++                            <thead>
++                            <tr>
++                                <th>{{ trans('admin.users.hwid.col.time') }}</th>
++                                <th>{{ trans('admin.users.hwid.col.source') }}</th>
++                                <th>{{ trans('admin.users.hwid.col.result') }}</th>
++                                <th>{{ trans('admin.users.hwid.col.ip') }}</th>
++                                <th>HWID</th>
++                                <th>{{ trans('admin.users.hwid.col.client') }}</th>
++                            </tr>
++                            </thead>
++                            <tbody>
++                            @foreach($panel['logins'] as $login)
++                                <tr>
++                                    <td class="text-nowrap">{{ \Azuriom\Support\HwidPanel::time($login->created_at) }}</td>
++                                    <td><span class="badge {{ $login->source === 'launcher' ? 'text-bg-primary' : 'text-bg-secondary' }}">{{ $login->source === 'launcher' ? 'лаунчер' : ($login->source === 'site' ? 'сайт' : $login->source) }}</span></td>
++                                    <td><span class="badge {{ $login->result === 'success' || $login->result === 'ok' ? 'text-bg-success' : 'text-bg-danger' }}">{{ $login->result }}</span></td>
++                                    <td class="font-monospace">{{ $login->ip ?? '—' }}</td>
++                                    <td>{{ $login->hwid_id ?? '—' }}</td>
++                                    <td class="text-truncate" style="max-width: 22rem" title="{{ $login->client }}">{{ $login->client ?? '—' }}</td>
++                                </tr>
++                            @endforeach
++                            </tbody>
++                        </table>
++                    </div>
++                    {{ $panel['logins']->links() }}
++                @else
++                    <p class="text-muted small mb-0">{{ trans('admin.users.hwid.logins_empty') }}</p>
++                @endif
++            </div>
++        </div>
+     </div>
+     </div>
+ </div>
+@@ -174,6 +440,22 @@
+                 word-break: break-word;
+             }
+ 
++            .hwid-ph {
++                font-size: 0.62rem;
++                font-weight: 500;
++                vertical-align: middle;
++            }
++
++            .hwid-json {
++                font-size: 0.7rem;
++                max-height: 16rem;
++                overflow: auto;
++                white-space: pre-wrap;
++                background: var(--bs-tertiary-bg, rgba(0, 0, 0, 0.03));
++                border-radius: 4px;
++                padding: 0.3rem 0.4rem;
++            }
++
+             .hwid-linked-user {
+                 display: inline-flex;
+                 align-items: center;
+diff --git a/routes/admin.php b/routes/admin.php
+index 6b56d2c..d9b7059 100755
+--- a/routes/admin.php
++++ b/routes/admin.php
+@@ -5,6 +5,7 @@ use Azuriom\Http\Controllers\Admin\AdminController;
+ use Azuriom\Http\Controllers\Admin\BanController;
+ use Azuriom\Http\Controllers\Admin\HwidBanController;
+ use Azuriom\Http\Controllers\Admin\HwidController;
++use Azuriom\Http\Controllers\Admin\HwidManageController;
+ use Azuriom\Http\Controllers\Admin\ImageController;
+ use Azuriom\Http\Controllers\Admin\NavbarController;
+ use Azuriom\Http\Controllers\Admin\PageAttachmentController;
+@@ -70,6 +71,8 @@ Route::prefix('users')->name('users.')->middleware('can:admin.users')->group(fun
+     Route::post('/{user}/telegram/unlink', [UserController::class, 'unlinkTelegram'])->name('telegram.unlink');
+     Route::post('/{user}/hwid/ban', [HwidBanController::class, 'store'])->name('hwid.ban');
+     Route::delete('/{user}/hwid/ban', [HwidBanController::class, 'destroy'])->name('hwid.unban');
++    Route::post('/{user}/hwid/unlink', [HwidManageController::class, 'unlink'])->name('hwid.unlink');
++    Route::post('/{user}/hwid/split/{other}', [HwidManageController::class, 'split'])->name('hwid.split');
+ });
+ 
+ Route::prefix('themes')->name('themes.')->middleware('can:admin.themes')->group(function () {
