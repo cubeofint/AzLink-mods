@@ -68,6 +68,9 @@ Existing behaviour is unchanged while the global queue flag is off.
    enabled **and** the user has `admin.access` or `currency.server_movements_public = 1`
    (default off): `CurrencyServerMovement::visibleTo()`. Receiving movements from servers is
    still governed by `currency.server_movements_enabled` only.
+5. `0005` — labels for the cointcore player vending movement types in `CurrencyServerMovement::TYPES`:
+   `player_shop_buy` = "Покупка в автомате игрока", `player_shop_sell` = "Продажа в автомат игрока"
+   (the site already accepted these types; only the history labels were missing).
 
 ## Apply (after DB dump + file backup, with confirmation)
 
@@ -77,6 +80,7 @@ git apply ../AzLink-mods/site-patches/gluon-server-adjust/0001-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0002-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0003-*.patch
 git apply ../AzLink-mods/site-patches/gluon-server-adjust/0004-*.patch
+git apply ../AzLink-mods/site-patches/gluon-server-adjust/0005-*.patch
 php artisan migrate --force
 php artisan currency:verify-ledger
 # enable only when ready, e.g. server 9 only:
