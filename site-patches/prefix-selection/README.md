@@ -26,7 +26,7 @@ See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
 - Tables: `prefix_catalog`, `user_server_prefixes`, `prefix_operations` (up/down).
 - AzLink API (`server.token`, same as other AzLink endpoints):
   - `POST /api/azlink/prefixes/report` `{players:[{uuid,name,available:[{group,prefix_raw,category}],selected,locked_staff}]}`
-  - `POST /api/azlink/prefixes/catalog` `{schema,hash,full,force?,groups:[{group,prefix_raw,priority,track_index,display_name,category}]}` (max 256)
+  - `POST /api/azlink/prefixes/catalog` `{schema,hash,full,groups:[{group,prefix_raw,priority,track_index,display_name,category}]}` (max 256)
   - `GET  /api/azlink/prefixes/operations` pending `prefix_select` `{op_id,type,uuid,group}` with lease
   - `POST /api/azlink/prefixes/ack` `{op_id,status:applied|rejected,reason,selected}` (idempotent)
 - Cabinet tab «Префиксы»: per-server pills, rendered preview (`&` / MiniMessage → HTML),
@@ -35,9 +35,9 @@ See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
   (`Донатные и служебные префиксы отображаются всегда`). Staff can pick a quest
   prefix. A quest group with no catalog row is still shown from the player report.
   Disabled catalog rows are not shown.
-- Admin `/admin/prefixes` is **read-only**: per-server list with preview, last
-  export time and missing groups. No catalog CRUD. Player prefixes + reset to
-  Авто and the operation log stay.
+- Admin `/admin/prefixes` is **read-only**: per-server list with preview and last
+  export time. No catalog CRUD. Player prefixes + reset to Авто and the
+  operation log stay.
 - Flag `prefixes.enabled` (default **off**, endpoints 404). `prefixes.lease_seconds` default `30`.
 - `php artisan prefixes:check` — read-only dry-run.
 
@@ -60,11 +60,14 @@ User link: `users.game_id` (dashed or undashed UUID), then exact `name`. Unknown
 
 LuckPerms is the only source of truth. Per-server upsert by `(server_id, group)`
 writes auto fields and copies them onto the visible columns. Same `hash` is a
-no-op. Empty `groups` or `full=false` disables nothing. A full export that would
-drop more than 50% of present groups needs `force: true` (otherwise
-`409 force_required`). Missing groups get `missing_since` + `enabled=false`
-(rows stay) and are re-enabled when they return. Existing `server_id` NULL
-(manual) rows are ignored by the cabinet once that server has a catalog.
+no-op. A **full** export (`full=true`) is authoritative: groups missing from
+the payload are **deleted** from that server's catalog (not disabled). Player
+`user_server_prefixes.selected` and `available` entries that reference those
+groups on that server are cleared. An empty full export wipes the server
+catalog. `full=false` is non-destructive (upsert only). After a wipe the
+catalog is rebuilt from the export sent on server start. Existing
+`server_id` NULL rows are ignored by the cabinet once that server has a
+catalog.
 
 ### Site → game: `GET /api/azlink/prefixes/operations?limit=50`
 
@@ -135,4 +138,6 @@ MiniMessage / legacy → HTML conversion.
 2. `0002` — cabinet tab, admin catalog/log/user reset, lang, theme partials, admin/profile route hunks.
 3. `0003` — per-server LuckPerms catalog import (`POST /api/azlink/prefixes/catalog`),
    quest-only cabinet, reporter stores categories as given, read-only admin catalog
-   (no CRUD / overrides). Incremental migration; does not rewrite `0001`.
+   (no CRUD / overrides). A full export is authoritative (wipe deletes missing
+   groups and clears player selected/available on that server). Incremental
+   migration; does not rewrite `0001`.

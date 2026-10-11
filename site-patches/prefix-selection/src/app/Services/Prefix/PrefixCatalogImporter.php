@@ -4,19 +4,19 @@ namespace Azuriom\Services\Prefix;
 
 use Azuriom\Models\PrefixCatalog;
 use Azuriom\Models\PrefixCatalogImport;
+use Azuriom\Models\UserServerPrefix;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
-use RuntimeException;
 
 /**
- * Game → site LuckPerms track export. Per-server upsert; LuckPerms is source of truth.
+ * Game → site LuckPerms track export. A full payload is authoritative (wipe-safe).
  */
 class PrefixCatalogImporter
 {
     public const MAX_GROUPS = 256;
 
     /**
-     * @param  array{schema?: mixed, hash: string, full?: mixed, force?: mixed, groups?: mixed}  $payload
+     * @param  array{schema?: mixed, hash: string, full?: mixed, groups?: mixed}  $payload
      * @return array<string, mixed>
      */
     public function import(int $serverId, array $payload): array
@@ -24,7 +24,6 @@ class PrefixCatalogImporter
         $hash = (string) ($payload['hash'] ?? '');
         $schema = isset($payload['schema']) ? substr((string) $payload['schema'], 0, 32) : null;
         $full = $this->truthy($payload['full'] ?? false);
-        $force = $this->truthy($payload['force'] ?? false);
         $groups = $this->normalizeGroups($payload['groups'] ?? []);
 
         $previous = PrefixCatalogImport::query()->where('server_id', $serverId)->first();
@@ -36,7 +35,7 @@ class PrefixCatalogImporter
             ];
         }
 
-        return DB::transaction(function () use ($serverId, $hash, $schema, $full, $force, $groups) {
+        return DB::transaction(function () use ($serverId, $hash, $schema, $full, $groups) {
             $now = Carbon::now();
             $incoming = collect($groups)->keyBy('group');
             $existing = PrefixCatalog::query()
@@ -44,11 +43,6 @@ class PrefixCatalogImporter
                 ->lockForUpdate()
                 ->get()
                 ->keyBy('group');
-
-            $wouldDisable = $existing
-                ->filter(fn (PrefixCatalog $row) => $row->missing_since === null && ! $incoming->has($row->group));
-
-            $this->assertMissingGuard($existing, $wouldDisable, $groups, $full, $force);
 
             $created = 0;
             $updated = 0;
@@ -67,16 +61,15 @@ class PrefixCatalogImporter
                 $updated++;
             }
 
-            $missing = 0;
-            if ($full && $groups !== []) {
-                foreach ($wouldDisable as $row) {
-                    if ($row->missing_since === null) {
-                        $row->missing_since = $now;
-                    }
-                    $row->enabled = false;
-                    $row->save();
-                    $missing++;
+            $deleted = 0;
+            if ($full) {
+                $gone = $existing->filter(fn (PrefixCatalog $row) => ! $incoming->has($row->group));
+                $deletedGroups = $gone->keys()->all();
+                foreach ($gone as $row) {
+                    $row->delete();
+                    $deleted++;
                 }
+                $this->forgetPlayerGroups($serverId, $deletedGroups);
             }
 
             PrefixCatalogImport::query()->updateOrCreate(
@@ -95,30 +88,45 @@ class PrefixCatalogImporter
                 'hash' => $hash,
                 'created' => $created,
                 'updated' => $updated,
-                'missing' => $missing,
+                'deleted' => $deleted,
                 'imported_at' => $now->toIso8601String(),
             ];
         });
     }
 
     /**
-     * @param  \Illuminate\Support\Collection<string, PrefixCatalog>  $existing
-     * @param  \Illuminate\Support\Collection<string, PrefixCatalog>  $wouldDisable
-     * @param  list<array<string, mixed>>  $groups
+     * @param  list<string>  $groups
      */
-    private function assertMissingGuard($existing, $wouldDisable, array $groups, bool $full, bool $force): void
+    private function forgetPlayerGroups(int $serverId, array $groups): void
     {
-        if (! $full || $groups === []) {
+        if ($groups === []) {
             return;
         }
 
-        $present = $existing->filter(fn (PrefixCatalog $row) => $row->missing_since === null)->count();
-        if ($present === 0) {
-            return;
-        }
+        $drop = array_fill_keys($groups, true);
+        $rows = UserServerPrefix::query()
+            ->where('server_id', $serverId)
+            ->lockForUpdate()
+            ->get();
 
-        if (($wouldDisable->count() / $present) > 0.5 && ! $force) {
-            throw new RuntimeException('prefix_catalog_force_required');
+        foreach ($rows as $row) {
+            $available = [];
+            foreach ($row->available ?? [] as $item) {
+                $group = (string) ($item['group'] ?? '');
+                if ($group !== '' && isset($drop[$group])) {
+                    continue;
+                }
+                $available[] = $item;
+            }
+
+            $selected = $row->selected;
+            if (is_string($selected) && isset($drop[$selected])) {
+                $selected = null;
+            }
+
+            $row->available = $available;
+            $row->selected = $selected;
+            $row->save();
         }
     }
 

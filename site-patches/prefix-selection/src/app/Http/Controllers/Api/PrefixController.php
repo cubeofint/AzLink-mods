@@ -8,7 +8,6 @@ use Azuriom\Services\Prefix\PrefixOperationQueue;
 use Azuriom\Services\Prefix\PrefixReporter;
 use Azuriom\Services\Prefix\PrefixSelection;
 use Illuminate\Http\Request;
-use RuntimeException;
 
 /**
  * AzLink prefix sync. Disabled unless setting prefixes.enabled = 1.
@@ -49,7 +48,6 @@ class PrefixController extends Controller
             'schema' => ['required'],
             'hash' => ['required', 'string', 'max:64'],
             'full' => ['required', 'boolean'],
-            'force' => ['nullable', 'boolean'],
             'groups' => ['present', 'array', 'max:'.PrefixCatalogImporter::MAX_GROUPS],
             'groups.*.group' => ['required', 'string', 'max:64'],
             'groups.*.prefix_raw' => ['nullable', 'string', 'max:255'],
@@ -59,17 +57,7 @@ class PrefixController extends Controller
             'groups.*.category' => ['nullable', 'string', 'max:16'],
         ]);
 
-        try {
-            $result = $importer->import((int) $request->input('server-id'), $data);
-        } catch (RuntimeException $e) {
-            if ($e->getMessage() === 'prefix_catalog_force_required') {
-                return response()->json(['message' => 'force_required'], 409);
-            }
-
-            throw $e;
-        }
-
-        return response()->json($result);
+        return response()->json($importer->import((int) $request->input('server-id'), $data));
     }
 
     public function operations(Request $request, PrefixOperationQueue $queue)

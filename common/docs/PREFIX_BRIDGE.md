@@ -66,7 +66,6 @@ Per-server LuckPerms track export. Auth is the server token (`server_id`). Max 2
   "schema": 1,
   "hash": "sha256-or-any-stable-digest",
   "full": true,
-  "force": false,
   "groups": [
     {
       "group": "miner",
@@ -86,12 +85,13 @@ Per-server LuckPerms track export. Auth is the server token (`server_id`). Max 2
   `auto_prefix_raw`, `auto_sort` from `track_index`, `priority`, `category`,
   `last_seen_at`) and copies them onto the visible columns.
 - Same `hash` for this server is a no-op (`unchanged: true`).
-- `full=true` with a non-empty `groups` list marks missing rows (`missing_since`,
-  `enabled=false`) without deleting them. They are re-enabled when they return.
-- Empty `groups` or `full=false` disables nothing.
-- If more than 50% of currently present (not already missing) groups would
-  disappear, the site answers `409 { "message": "force_required" }` unless
-  `force: true`.
+- `full=true` is authoritative (wipe-safe). Groups missing from the payload
+  are **deleted** from that server's `prefix_catalog`. `user_server_prefixes`
+  for that server have `selected` reset if it pointed at a deleted group, and
+  matching items are removed from `available`. An empty `groups` list on a
+  full export clears the server catalog completely.
+- `full=false` is non-destructive: upsert only, nothing is deleted.
+- After a wipe the catalog is rebuilt from the export sent on server start.
 
 ## Site → game: `GET /api/azlink/prefixes/operations?limit=50`
 

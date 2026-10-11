@@ -1,11 +1,39 @@
+From 658b36f4d42db349e0e9075ab8fa1d8b5c305e89 Mon Sep 17 00:00:00 2001
 From: mawleesys <alsoalberdo@gmail.com>
-Subject: [PATCH] Prefix catalog: per-server LuckPerms import, read-only admin
+Date: Sun, 11 Oct 2026 15:49:03 +0000
+Subject: [PATCH] Prefix catalog: per-server LuckPerms import,
+ wipe-authoritative full export
 
 POST /api/azlink/prefixes/catalog, incremental migration (server_id + auto
-fields), quest-only cabinet. Catalog is technical: no CRUD, no overrides.
-Admin is a per-server read-only list. Does not rewrite 0001 tables.
-
+fields), quest-only cabinet. Full export deletes missing groups and clears
+player selected/available on that server. No CRUD, no overrides.
+Does not rewrite 0001 tables.
 ---
+ app/Console/Commands/PrefixCheckCommand.php   |  11 +-
+ .../Admin/PrefixCatalogController.php         |  84 +----
+ app/Http/Controllers/Api/PrefixController.php |  22 ++
+ .../Controllers/ProfilePrefixController.php   |   1 -
+ app/Models/PrefixCatalog.php                  |  76 +++-
+ app/Models/PrefixCatalogImport.php            |  35 ++
+ app/Services/Prefix/PrefixCatalogImporter.php | 211 +++++++++++
+ app/Services/Prefix/PrefixReporter.php        |   5 +-
+ app/Services/Prefix/PrefixSelection.php       |  42 ++-
+ ...0_add_prefix_catalog_per_server_import.php |  80 ++++
+ resources/lang/ru/prefixes.php                |  18 +-
+ .../coints/views/profile/_prefixes.blade.php  |  11 +-
+ .../views/admin/prefixes/index.blade.php      |  71 +++-
+ .../views/admin/users/_prefixes.blade.php     |   3 -
+ resources/views/profile/_prefixes.blade.php   |  10 +-
+ routes/admin.php                              |   2 +-
+ routes/api.php                                |   1 +
+ tests/Feature/PrefixCatalogImportTest.php     | 353 ++++++++++++++++++
+ tests/Feature/PrefixSelectionTest.php         | 115 ++++--
+ 19 files changed, 993 insertions(+), 158 deletions(-)
+ create mode 100644 app/Models/PrefixCatalogImport.php
+ create mode 100644 app/Services/Prefix/PrefixCatalogImporter.php
+ create mode 100644 database/migrations/2026_10_11_100000_add_prefix_catalog_per_server_import.php
+ create mode 100644 tests/Feature/PrefixCatalogImportTest.php
+
 diff --git a/app/Console/Commands/PrefixCheckCommand.php b/app/Console/Commands/PrefixCheckCommand.php
 index b593fea..a12eff3 100644
 --- a/app/Console/Commands/PrefixCheckCommand.php
@@ -161,10 +189,10 @@ index 30de587..0501c13 100644
 -    }
  }
 diff --git a/app/Http/Controllers/Api/PrefixController.php b/app/Http/Controllers/Api/PrefixController.php
-index 4220d0a..b4d177e 100644
+index 4220d0a..1b47ce5 100644
 --- a/app/Http/Controllers/Api/PrefixController.php
 +++ b/app/Http/Controllers/Api/PrefixController.php
-@@ -3,15 +3,18 @@
+@@ -3,6 +3,7 @@
  namespace Azuriom\Http\Controllers\Api;
  
  use Azuriom\Http\Controllers\Controller;
@@ -172,10 +200,7 @@ index 4220d0a..b4d177e 100644
  use Azuriom\Services\Prefix\PrefixOperationQueue;
  use Azuriom\Services\Prefix\PrefixReporter;
  use Azuriom\Services\Prefix\PrefixSelection;
- use Illuminate\Http\Request;
-+use RuntimeException;
- 
- /**
+@@ -12,6 +13,7 @@ use Illuminate\Http\Request;
   * AzLink prefix sync. Disabled unless setting prefixes.enabled = 1.
   *
   * POST /api/azlink/prefixes/report
@@ -183,7 +208,7 @@ index 4220d0a..b4d177e 100644
   * GET  /api/azlink/prefixes/operations
   * POST /api/azlink/prefixes/ack
   */
-@@ -38,6 +41,37 @@ class PrefixController extends Controller
+@@ -38,6 +40,26 @@ class PrefixController extends Controller
          return response()->json($result);
      }
  
@@ -195,7 +220,6 @@ index 4220d0a..b4d177e 100644
 +            'schema' => ['required'],
 +            'hash' => ['required', 'string', 'max:64'],
 +            'full' => ['required', 'boolean'],
-+            'force' => ['nullable', 'boolean'],
 +            'groups' => ['present', 'array', 'max:'.PrefixCatalogImporter::MAX_GROUPS],
 +            'groups.*.group' => ['required', 'string', 'max:64'],
 +            'groups.*.prefix_raw' => ['nullable', 'string', 'max:255'],
@@ -205,17 +229,7 @@ index 4220d0a..b4d177e 100644
 +            'groups.*.category' => ['nullable', 'string', 'max:16'],
 +        ]);
 +
-+        try {
-+            $result = $importer->import((int) $request->input('server-id'), $data);
-+        } catch (RuntimeException $e) {
-+            if ($e->getMessage() === 'prefix_catalog_force_required') {
-+                return response()->json(['message' => 'force_required'], 409);
-+            }
-+
-+            throw $e;
-+        }
-+
-+        return response()->json($result);
++        return response()->json($importer->import((int) $request->input('server-id'), $data));
 +    }
 +
      public function operations(Request $request, PrefixOperationQueue $queue)
@@ -397,29 +411,29 @@ index 0000000..f41d1b7
 +}
 diff --git a/app/Services/Prefix/PrefixCatalogImporter.php b/app/Services/Prefix/PrefixCatalogImporter.php
 new file mode 100644
-index 0000000..ba2f82b
+index 0000000..9bff46f
 --- /dev/null
 +++ b/app/Services/Prefix/PrefixCatalogImporter.php
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,211 @@
 +<?php
 +
 +namespace Azuriom\Services\Prefix;
 +
 +use Azuriom\Models\PrefixCatalog;
 +use Azuriom\Models\PrefixCatalogImport;
++use Azuriom\Models\UserServerPrefix;
 +use Illuminate\Support\Carbon;
 +use Illuminate\Support\Facades\DB;
-+use RuntimeException;
 +
 +/**
-+ * Game → site LuckPerms track export. Per-server upsert; LuckPerms is source of truth.
++ * Game → site LuckPerms track export. A full payload is authoritative (wipe-safe).
 + */
 +class PrefixCatalogImporter
 +{
 +    public const MAX_GROUPS = 256;
 +
 +    /**
-+     * @param  array{schema?: mixed, hash: string, full?: mixed, force?: mixed, groups?: mixed}  $payload
++     * @param  array{schema?: mixed, hash: string, full?: mixed, groups?: mixed}  $payload
 +     * @return array<string, mixed>
 +     */
 +    public function import(int $serverId, array $payload): array
@@ -427,7 +441,6 @@ index 0000000..ba2f82b
 +        $hash = (string) ($payload['hash'] ?? '');
 +        $schema = isset($payload['schema']) ? substr((string) $payload['schema'], 0, 32) : null;
 +        $full = $this->truthy($payload['full'] ?? false);
-+        $force = $this->truthy($payload['force'] ?? false);
 +        $groups = $this->normalizeGroups($payload['groups'] ?? []);
 +
 +        $previous = PrefixCatalogImport::query()->where('server_id', $serverId)->first();
@@ -439,7 +452,7 @@ index 0000000..ba2f82b
 +            ];
 +        }
 +
-+        return DB::transaction(function () use ($serverId, $hash, $schema, $full, $force, $groups) {
++        return DB::transaction(function () use ($serverId, $hash, $schema, $full, $groups) {
 +            $now = Carbon::now();
 +            $incoming = collect($groups)->keyBy('group');
 +            $existing = PrefixCatalog::query()
@@ -447,11 +460,6 @@ index 0000000..ba2f82b
 +                ->lockForUpdate()
 +                ->get()
 +                ->keyBy('group');
-+
-+            $wouldDisable = $existing
-+                ->filter(fn (PrefixCatalog $row) => $row->missing_since === null && ! $incoming->has($row->group));
-+
-+            $this->assertMissingGuard($existing, $wouldDisable, $groups, $full, $force);
 +
 +            $created = 0;
 +            $updated = 0;
@@ -470,16 +478,15 @@ index 0000000..ba2f82b
 +                $updated++;
 +            }
 +
-+            $missing = 0;
-+            if ($full && $groups !== []) {
-+                foreach ($wouldDisable as $row) {
-+                    if ($row->missing_since === null) {
-+                        $row->missing_since = $now;
-+                    }
-+                    $row->enabled = false;
-+                    $row->save();
-+                    $missing++;
++            $deleted = 0;
++            if ($full) {
++                $gone = $existing->filter(fn (PrefixCatalog $row) => ! $incoming->has($row->group));
++                $deletedGroups = $gone->keys()->all();
++                foreach ($gone as $row) {
++                    $row->delete();
++                    $deleted++;
 +                }
++                $this->forgetPlayerGroups($serverId, $deletedGroups);
 +            }
 +
 +            PrefixCatalogImport::query()->updateOrCreate(
@@ -498,30 +505,45 @@ index 0000000..ba2f82b
 +                'hash' => $hash,
 +                'created' => $created,
 +                'updated' => $updated,
-+                'missing' => $missing,
++                'deleted' => $deleted,
 +                'imported_at' => $now->toIso8601String(),
 +            ];
 +        });
 +    }
 +
 +    /**
-+     * @param  \Illuminate\Support\Collection<string, PrefixCatalog>  $existing
-+     * @param  \Illuminate\Support\Collection<string, PrefixCatalog>  $wouldDisable
-+     * @param  list<array<string, mixed>>  $groups
++     * @param  list<string>  $groups
 +     */
-+    private function assertMissingGuard($existing, $wouldDisable, array $groups, bool $full, bool $force): void
++    private function forgetPlayerGroups(int $serverId, array $groups): void
 +    {
-+        if (! $full || $groups === []) {
++        if ($groups === []) {
 +            return;
 +        }
 +
-+        $present = $existing->filter(fn (PrefixCatalog $row) => $row->missing_since === null)->count();
-+        if ($present === 0) {
-+            return;
-+        }
++        $drop = array_fill_keys($groups, true);
++        $rows = UserServerPrefix::query()
++            ->where('server_id', $serverId)
++            ->lockForUpdate()
++            ->get();
 +
-+        if (($wouldDisable->count() / $present) > 0.5 && ! $force) {
-+            throw new RuntimeException('prefix_catalog_force_required');
++        foreach ($rows as $row) {
++            $available = [];
++            foreach ($row->available ?? [] as $item) {
++                $group = (string) ($item['group'] ?? '');
++                if ($group !== '' && isset($drop[$group])) {
++                    continue;
++                }
++                $available[] = $item;
++            }
++
++            $selected = $row->selected;
++            if (is_string($selected) && isset($drop[$selected])) {
++                $selected = null;
++            }
++
++            $row->available = $available;
++            $row->selected = $selected;
++            $row->save();
 +        }
 +    }
 +
@@ -818,7 +840,7 @@ index 0000000..744f6e1
 +    }
 +};
 diff --git a/resources/lang/ru/prefixes.php b/resources/lang/ru/prefixes.php
-index c7cb2c3..f6a58ca 100644
+index c7cb2c3..9bc0229 100644
 --- a/resources/lang/ru/prefixes.php
 +++ b/resources/lang/ru/prefixes.php
 @@ -5,6 +5,7 @@ return [
@@ -839,7 +861,7 @@ index c7cb2c3..f6a58ca 100644
          'empty' => 'Пока нет данных с серверов. Зайдите в игру — доступные префиксы появятся после синхронизации.',
          'server' => 'Сервер',
          'current' => 'Текущий префикс',
-@@ -41,20 +43,21 @@ return [
+@@ -41,20 +43,20 @@ return [
          'nav' => 'Префиксы',
          'catalog' => [
              'title' => 'Каталог префиксов',
@@ -859,12 +881,11 @@ index c7cb2c3..f6a58ca 100644
 -            'empty' => 'Каталог пуст.',
 +            'empty' => 'Каталог пуст. Экспорт придёт из игры (LuckPerms).',
              'flag_off' => 'Синхронизация выключена (настройка prefixes.enabled). Кабинет и AzLink-эндпоинты отвечают 404, пока флаг выключен.',
-+            'missing_since' => 'Пропал с',
 +            'last_export' => 'Последний экспорт с серверов',
 +            'imported_at' => 'Импортирован',
 +            'hash' => 'Хеш',
 +            'groups' => 'Групп',
-+            'readonly' => 'Каталог заполняется только автоэкспортом из игры. LuckPerms — единственный источник. Ручное редактирование отключено.',
++            'readonly' => 'Каталог заполняется только автоэкспортом из игры. Полный экспорт — снимок LuckPerms: пропавшие группы удаляются. Ручное редактирование отключено.',
          ],
          'ops' => [
              'title' => 'Журнал операций префиксов',
@@ -912,10 +933,10 @@ index b8168e8..e1d1436 100644
                                                      <form action="{{ $selectRoute }}" method="POST" class="d-inline">
                                                          @csrf
 diff --git a/resources/views/admin/prefixes/index.blade.php b/resources/views/admin/prefixes/index.blade.php
-index a3d07ba..d728a79 100644
+index a3d07ba..efaa440 100644
 --- a/resources/views/admin/prefixes/index.blade.php
 +++ b/resources/views/admin/prefixes/index.blade.php
-@@ -16,51 +16,92 @@
+@@ -16,47 +16,80 @@
          <div class="alert alert-info">{{ trans('prefixes.admin.catalog.flag_off') }}</div>
      @endunless
  
@@ -984,15 +1005,13 @@ index a3d07ba..d728a79 100644
                          <th>{{ trans('prefixes.admin.catalog.preview') }}</th>
                          <th>{{ trans('prefixes.admin.catalog.category') }}</th>
                          <th>{{ trans('prefixes.admin.catalog.sort') }}</th>
-+                        <th>{{ trans('prefixes.admin.catalog.missing_since') }}</th>
                          <th>{{ trans('prefixes.admin.catalog.enabled') }}</th>
 -                        <th class="text-end"></th>
                      </tr>
                      </thead>
                      <tbody>
                      @forelse($items as $item)
--                        <tr>
-+                        <tr @class(['table-warning' => $item->missing_since !== null])>
+                         <tr>
 +                            <td>{{ $item->server?->name ?? '—' }}</td>
                              <td><code>{{ $item->group }}</code></td>
 -                            <td>{{ $item->display_name }}</td>
@@ -1001,7 +1020,8 @@ index a3d07ba..d728a79 100644
 +                            <td>{!! $formatter->toHtml($item->visiblePrefixRaw()) !!}</td>
                              <td>{{ \Azuriom\Models\PrefixCatalog::categoryLabel($item->category) }}</td>
 -                            <td>{{ $item->sort }}</td>
--                            <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
++                            <td>{{ $item->visibleSort() }}</td>
+                             <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
 -                            <td class="text-end">
 -                                <a href="{{ route('admin.prefixes.edit', $item) }}" class="btn btn-sm btn-outline-primary">
 -                                    {{ trans('messages.actions.edit') }}
@@ -1012,23 +1032,10 @@ index a3d07ba..d728a79 100644
 -                                    @method('DELETE')
 -                                    <button type="submit" class="btn btn-sm btn-outline-danger">{{ trans('messages.actions.delete') }}</button>
 -                                </form>
-+                            <td>{{ $item->visibleSort() }}</td>
-+                            <td>
-+                                @if($item->missing_since)
-+                                    {{ format_date($item->missing_since, true) }}
-+                                @else
-+                                    —
-+                                @endif
-                             </td>
-+                            <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
+-                            </td>
                          </tr>
                      @empty
                          <tr>
--                            <td colspan="7" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
-+                            <td colspan="8" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
-                         </tr>
-                     @endforelse
-                     </tbody>
 diff --git a/resources/views/admin/users/_prefixes.blade.php b/resources/views/admin/users/_prefixes.blade.php
 index 36df675..bacca19 100644
 --- a/resources/views/admin/users/_prefixes.blade.php
@@ -1103,10 +1110,10 @@ index 66d3577..02dfddc 100644
      Route::post('/register', [ServerController::class, 'register']);
 diff --git a/tests/Feature/PrefixCatalogImportTest.php b/tests/Feature/PrefixCatalogImportTest.php
 new file mode 100644
-index 0000000..a6bc417
+index 0000000..153fdc7
 --- /dev/null
 +++ b/tests/Feature/PrefixCatalogImportTest.php
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,353 @@
 +<?php
 +
 +namespace Tests\Feature;
@@ -1120,7 +1127,6 @@ index 0000000..a6bc417
 +use Azuriom\Services\Prefix\PrefixCatalogImporter;
 +use Azuriom\Services\Prefix\PrefixSelection;
 +use Illuminate\Foundation\Testing\RefreshDatabase;
-+use RuntimeException;
 +use Tests\TestCase;
 +
 +/**
@@ -1179,12 +1185,11 @@ index 0000000..a6bc417
 +        $this->assertTrue($row->enabled);
 +        $this->assertSame('&a[Miner]', $row->prefix_raw);
 +        $this->assertSame('&a[Miner]', $row->auto_prefix_raw);
-+        $this->assertNull($row->missing_since);
 +        $this->assertSame('Miner', $row->visibleDisplayName());
 +        $this->assertSame(10, $row->visibleSort());
 +    }
 +
-+    public function test_missing_groups_from_full_export_are_disabled(): void
++    public function test_missing_groups_from_full_export_are_deleted(): void
 +    {
 +        $this->importer()->import($this->server->id, $this->payload('h-full', [
 +            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
@@ -1195,14 +1200,71 @@ index 0000000..a6bc417
 +            $this->group('miner', '&a[M2]', 1, 1, 'Miner', 'quest'),
 +        ]));
 +
-+        $this->assertSame(1, $second['missing']);
-+        $farmer = PrefixCatalog::query()->where('group', 'farmer')->first();
-+        $this->assertNotNull($farmer->missing_since);
-+        $this->assertFalse($farmer->enabled);
-+        $miner = PrefixCatalog::query()->where('group', 'miner')->first();
-+        $this->assertNull($miner->missing_since);
++        $this->assertSame(1, $second['deleted']);
++        $this->assertNull(PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'farmer')->first());
++        $miner = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first();
++        $this->assertNotNull($miner);
 +        $this->assertTrue($miner->enabled);
 +        $this->assertSame('&a[M2]', $miner->prefix_raw);
++        $this->assertSame(1, PrefixCatalog::query()->where('server_id', $this->server->id)->count());
++    }
++
++    public function test_full_export_clears_player_selected_and_available(): void
++    {
++        $other = Server::query()->create([
++            'name' => 'Other',
++            'address' => '127.0.0.1',
++            'type' => 'mc-azlink',
++            'port' => 25566,
++            'data' => [],
++        ]);
++        $user = User::factory()->create([
++            'name' => 'Nick',
++            'game_id' => 'f3fc162dd34432fa8c9a0b987b0791cf',
++        ]);
++
++        $this->importer()->import($this->server->id, $this->payload('seed', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++            $this->group('farmer', '&e[F]', 2, 2, 'Farmer', 'quest'),
++        ]));
++
++        UserServerPrefix::query()->create([
++            'user_id' => $user->id,
++            'server_id' => $this->server->id,
++            'available' => [
++                ['group' => 'miner', 'prefix_raw' => '&a[M]', 'category' => 'quest'],
++                ['group' => 'farmer', 'prefix_raw' => '&e[F]', 'category' => 'quest'],
++            ],
++            'selected' => 'farmer',
++            'synced_at' => now(),
++        ]);
++        UserServerPrefix::query()->create([
++            'user_id' => $user->id,
++            'server_id' => $other->id,
++            'available' => [
++                ['group' => 'farmer', 'prefix_raw' => '&e[F]', 'category' => 'quest'],
++            ],
++            'selected' => 'farmer',
++            'synced_at' => now(),
++        ]);
++
++        $this->importer()->import($this->server->id, $this->payload('wipe-farmer', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++        ]));
++
++        $row = UserServerPrefix::query()
++            ->where('user_id', $user->id)
++            ->where('server_id', $this->server->id)
++            ->first();
++        $this->assertNull($row->selected);
++        $this->assertSame(['miner'], collect($row->available)->pluck('group')->all());
++
++        $otherRow = UserServerPrefix::query()
++            ->where('user_id', $user->id)
++            ->where('server_id', $other->id)
++            ->first();
++        $this->assertSame('farmer', $otherRow->selected);
++        $this->assertSame(['farmer'], collect($otherRow->available)->pluck('group')->all());
 +    }
 +
 +    public function test_repeat_with_same_hash_is_idempotent(): void
@@ -1226,12 +1288,27 @@ index 0000000..a6bc417
 +        $this->assertSame(1, PrefixCatalogImport::query()->where('server_id', $this->server->id)->count());
 +    }
 +
-+    public function test_empty_groups_or_partial_export_do_not_disable(): void
++    public function test_empty_full_export_wipes_server_catalog(): void
 +    {
 +        $this->importer()->import($this->server->id, $this->payload('seed', [
 +            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
 +            $this->group('farmer', '&e[F]', 2, 2, 'Farmer', 'quest'),
 +        ]));
++
++        $user = User::factory()->create([
++            'name' => 'Nick',
++            'game_id' => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
++        ]);
++        UserServerPrefix::query()->create([
++            'user_id' => $user->id,
++            'server_id' => $this->server->id,
++            'available' => [
++                ['group' => 'miner', 'prefix_raw' => '&a[M]', 'category' => 'quest'],
++                ['group' => 'farmer', 'prefix_raw' => '&e[F]', 'category' => 'quest'],
++            ],
++            'selected' => 'miner',
++            'synced_at' => now(),
++        ]);
 +
 +        $empty = $this->importer()->import($this->server->id, [
 +            'schema' => 1,
@@ -1240,10 +1317,20 @@ index 0000000..a6bc417
 +            'groups' => [],
 +        ]);
 +        $this->assertFalse($empty['unchanged']);
-+        $this->assertSame(0, $empty['missing']);
-+        $this->assertTrue(PrefixCatalog::query()->where('group', 'miner')->value('enabled'));
-+        $this->assertTrue(PrefixCatalog::query()->where('group', 'farmer')->value('enabled'));
-+        $this->assertNull(PrefixCatalog::query()->where('group', 'miner')->value('missing_since'));
++        $this->assertSame(2, $empty['deleted']);
++        $this->assertSame(0, PrefixCatalog::query()->where('server_id', $this->server->id)->count());
++
++        $row = UserServerPrefix::query()->where('user_id', $user->id)->first();
++        $this->assertNull($row->selected);
++        $this->assertSame([], $row->available);
++    }
++
++    public function test_partial_export_does_not_delete(): void
++    {
++        $this->importer()->import($this->server->id, $this->payload('seed', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++            $this->group('farmer', '&e[F]', 2, 2, 'Farmer', 'quest'),
++        ]));
 +
 +        $partial = $this->importer()->import($this->server->id, [
 +            'schema' => 1,
@@ -1251,13 +1338,13 @@ index 0000000..a6bc417
 +            'full' => false,
 +            'groups' => [$this->group('miner', '&a[M3]', 1, 3, 'Miner', 'quest')],
 +        ]);
-+        $this->assertSame(0, $partial['missing']);
++        $this->assertSame(0, $partial['deleted']);
++        $this->assertNotNull(PrefixCatalog::query()->where('group', 'farmer')->first());
 +        $this->assertTrue(PrefixCatalog::query()->where('group', 'farmer')->value('enabled'));
-+        $this->assertNull(PrefixCatalog::query()->where('group', 'farmer')->value('missing_since'));
 +        $this->assertSame('&a[M3]', PrefixCatalog::query()->where('group', 'miner')->value('prefix_raw'));
 +    }
 +
-+    public function test_majority_disappear_requires_force(): void
++    public function test_full_export_may_delete_majority_without_force(): void
 +    {
 +        $this->importer()->import($this->server->id, $this->payload('base', [
 +            $this->group('a', '&a[A]', 1, 1, 'A', 'quest'),
@@ -1265,26 +1352,17 @@ index 0000000..a6bc417
 +            $this->group('c', '&a[C]', 3, 3, 'C', 'quest'),
 +        ]));
 +
-+        try {
-+            $this->importer()->import($this->server->id, $this->payload('drop', [
-+                $this->group('a', '&a[A]', 1, 1, 'A', 'quest'),
-+            ]));
-+            $this->fail('expected force_required');
-+        } catch (RuntimeException $e) {
-+            $this->assertSame('prefix_catalog_force_required', $e->getMessage());
-+        }
-+
-+        $this->assertSame(3, PrefixCatalog::query()->where('server_id', $this->server->id)->where('enabled', true)->count());
-+        $this->assertSame('base', PrefixCatalogImport::query()->where('server_id', $this->server->id)->value('hash'));
-+
-+        $forced = $this->importer()->import($this->server->id, $this->payload('drop', [
++        $result = $this->importer()->import($this->server->id, $this->payload('drop', [
 +            $this->group('a', '&a[A]', 1, 1, 'A', 'quest'),
-+        ], force: true));
-+        $this->assertSame(2, $forced['missing']);
-+        $this->assertFalse(PrefixCatalog::query()->where('group', 'b')->value('enabled'));
++        ]));
++
++        $this->assertSame(2, $result['deleted']);
++        $this->assertSame(1, PrefixCatalog::query()->where('server_id', $this->server->id)->count());
++        $this->assertSame('a', PrefixCatalog::query()->where('server_id', $this->server->id)->value('group'));
++        $this->assertSame('drop', PrefixCatalogImport::query()->where('server_id', $this->server->id)->value('hash'));
 +    }
 +
-+    public function test_returning_group_is_reenabled(): void
++    public function test_returning_group_is_recreated(): void
 +    {
 +        $this->importer()->import($this->server->id, $this->payload('all', [
 +            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
@@ -1292,19 +1370,21 @@ index 0000000..a6bc417
 +        ]));
 +        $this->importer()->import($this->server->id, $this->payload('gone', [
 +            $this->group('staff', '&c[S]', 2, 2, 'Staff', 'staff'),
-+        ], force: true));
++        ]));
++
++        $this->assertNull(PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first());
 +
 +        $this->importer()->import($this->server->id, $this->payload('back', [
 +            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
 +            $this->group('staff', '&c[S]', 2, 2, 'Staff', 'staff'),
 +        ]));
 +
-+        $miner = PrefixCatalog::query()->where('group', 'miner')->first();
++        $miner = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first();
++        $this->assertNotNull($miner);
 +        $this->assertTrue($miner->enabled);
-+        $this->assertNull($miner->missing_since);
-+        $staff = PrefixCatalog::query()->where('group', 'staff')->first();
++        $staff = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'staff')->first();
++        $this->assertNotNull($staff);
 +        $this->assertTrue($staff->enabled);
-+        $this->assertNull($staff->missing_since);
 +    }
 +
 +    public function test_null_catalog_is_ignored_once_server_catalog_exists(): void
@@ -1362,13 +1442,12 @@ index 0000000..a6bc417
 +     * @param  list<array<string, mixed>>  $groups
 +     * @return array<string, mixed>
 +     */
-+    private function payload(string $hash, array $groups, bool $force = false): array
++    private function payload(string $hash, array $groups): array
 +    {
 +        return [
 +            'schema' => 1,
 +            'hash' => $hash,
 +            'full' => true,
-+            'force' => $force,
 +            'groups' => $groups,
 +        ];
 +    }
@@ -1598,3 +1677,6 @@ index 21729d8..a70a06e 100644
              'locked_staff' => $locked,
              'synced_at' => now(),
          ]);
+-- 
+2.43.0
+

@@ -77,31 +77,23 @@
                         <th>{{ trans('prefixes.admin.catalog.preview') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.category') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.sort') }}</th>
-                        <th>{{ trans('prefixes.admin.catalog.missing_since') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.enabled') }}</th>
                     </tr>
                     </thead>
                     <tbody>
                     @forelse($items as $item)
-                        <tr @class(['table-warning' => $item->missing_since !== null])>
+                        <tr>
                             <td>{{ $item->server?->name ?? '—' }}</td>
                             <td><code>{{ $item->group }}</code></td>
                             <td>{{ $item->visibleDisplayName() }}</td>
                             <td>{!! $formatter->toHtml($item->visiblePrefixRaw()) !!}</td>
                             <td>{{ \Azuriom\Models\PrefixCatalog::categoryLabel($item->category) }}</td>
                             <td>{{ $item->visibleSort() }}</td>
-                            <td>
-                                @if($item->missing_since)
-                                    {{ format_date($item->missing_since, true) }}
-                                @else
-                                    —
-                                @endif
-                            </td>
                             <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="8" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
+                            <td colspan="7" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
                         </tr>
                     @endforelse
                     </tbody>

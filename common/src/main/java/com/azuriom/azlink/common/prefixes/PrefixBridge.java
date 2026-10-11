@@ -78,7 +78,7 @@ public final class PrefixBridge {
 
     /**
      * Push a per-server LuckPerms track catalog.
-     * JSON {@code {"schema","hash","full","force"?,"groups":[{group,prefix_raw,priority,track_index,display_name,category}]}}.
+     * JSON {@code {"schema","hash","full","groups":[{group,prefix_raw,priority,track_index,display_name,category}]}}.
      */
     public static CompletableFuture<String> reportPrefixCatalog(String json) {
         AzLinkPlugin current = plugin;
