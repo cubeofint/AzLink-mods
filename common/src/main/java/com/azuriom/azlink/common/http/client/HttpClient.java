@@ -97,6 +97,14 @@ public class HttpClient {
     }
 
     /**
+     * Game → site per-server prefix catalog export.
+     * Body {@code {schema,hash,full,force?,groups:[{group,prefix_raw,priority,track_index,display_name,category}]}}.
+     */
+    public CompletableFuture<JsonObject> reportPrefixCatalog(JsonObject body) {
+        return request(RequestMethod.POST, "/azlink/prefixes/catalog", body, JsonObject.class);
+    }
+
+    /**
      * Pending site → game prefix operations for this server (leased until ack or expiry).
      */
     public CompletableFuture<JsonObject> fetchPrefixOperations(int limit) {

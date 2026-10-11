@@ -10,12 +10,10 @@
 <div class="card mb-4">
     <div class="card-header">{{ trans('prefixes.cabinet.title') }}</div>
     <div class="card-body">
-        <p class="text-muted">{{ trans('prefixes.cabinet.intro') }}</p>
+        <p class="text-muted mb-1">{{ trans('prefixes.cabinet.intro') }}</p>
+        <p class="small text-muted">{{ trans('prefixes.cabinet.always_shown') }}</p>
         @forelse($prefixServers as $block)
             <h6>{{ $block['server']->name }}</h6>
-            @if($block['locked_staff'])
-                <div class="alert alert-warning py-2">{{ trans('prefixes.cabinet.staff_locked') }}</div>
-            @endif
             @if($block['row'] === null)
                 <p class="text-muted">{{ trans('prefixes.cabinet.not_synced') }}</p>
             @else
@@ -27,14 +25,14 @@
                     @csrf
                     <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
                     <input type="hidden" name="group" value="">
-                    <button class="btn btn-sm btn-secondary" @disabled($block['pending'] || $block['locked_staff'])>{{ trans('prefixes.cabinet.auto') }}</button>
+                    <button class="btn btn-sm btn-secondary" @disabled($block['pending'])>{{ trans('prefixes.cabinet.auto') }}</button>
                 </form>
                 @foreach($block['options'] as $option)
                     <form action="{{ $selectRoute }}" method="POST" class="mb-2">
                         @csrf
                         <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
                         <input type="hidden" name="group" value="{{ $option['group'] }}">
-                        <button class="btn btn-sm btn-primary" @disabled($block['pending'] || $block['locked_staff'])>
+                        <button class="btn btn-sm btn-primary" @disabled($block['pending'])>
                             {!! $option['preview'] !!} {{ $option['display_name'] }}
                         </button>
                     </form>

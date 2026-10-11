@@ -8,6 +8,9 @@ Auth: `Azuriom-Link-Token` (server token → `server_id`), same as every other A
 
 Feature flag on the site: `prefixes.enabled` (default off; endpoints answer 404).
 
+Cabinet selection is **quest-only**. Donate / staff / media prefixes stay visible in game
+and are not part of the site picker. The game may still report them on `/prefixes/report`.
+
 ## Java API
 
 cointcore (PR #34) reflects **`CoinOperationsBridge`** first. The same names exist on
@@ -20,6 +23,7 @@ static boolean isAvailable()
 static CompletableFuture<String> postJson(String path, String json)
 static CompletableFuture<String> getJson(String path)
 static CompletableFuture<String> reportPrefixes(String json)
+static CompletableFuture<String> reportPrefixCatalog(String json)
 static CompletableFuture<String> fetchPrefixOperations(int limit)
 static CompletableFuture<String> ackPrefix(String opId, String status, String reason, String selected)
 ```
@@ -51,6 +55,43 @@ via the `plugin` field on `CoinOperationsBridge`.
 - Stores `available`, `selected` (`null` = Авто), `locked_staff`, `synced_at`.
 - Unknown players are skipped (`skipped` in the response). Does not create accounts.
 - Idempotent last-write-wins for the snapshot.
+- `category` is stored as given (no hard list). The cabinet only offers `quest`.
+
+## Game → site: `POST /api/azlink/prefixes/catalog`
+
+Per-server LuckPerms track export. Auth is the server token (`server_id`). Max 256 groups.
+
+```json
+{
+  "schema": 1,
+  "hash": "sha256-or-any-stable-digest",
+  "full": true,
+  "force": false,
+  "groups": [
+    {
+      "group": "miner",
+      "prefix_raw": "&a[Шахтёр]",
+      "priority": 10,
+      "track_index": 3,
+      "display_name": "Шахтёр",
+      "category": "quest"
+    }
+  ]
+}
+```
+
+- Upsert by `(server_id, group)`. Updates only auto fields (`auto_display_name`,
+  `auto_prefix_raw`, `auto_sort` from `track_index`, `priority`, `category`,
+  `last_seen_at`). Visible `display_name` / `sort` / `enabled` follow an admin
+  override when the matching flag is set; otherwise they track auto.
+- Same `hash` for this server is a no-op (`unchanged: true`).
+- `full=true` with a non-empty `groups` list marks missing rows (`missing_since`,
+  `enabled=false`) without deleting them. They come back enabled unless
+  `override_enabled` (manually disabled).
+- Empty `groups` or `full=false` disables nothing.
+- If more than 50% of currently present (not already missing) groups would
+  disappear, the site answers `409 { "message": "force_required" }` unless
+  `force: true`.
 
 ## Site → game: `GET /api/azlink/prefixes/operations?limit=50`
 

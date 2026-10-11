@@ -3,6 +3,7 @@
 namespace Azuriom\Console\Commands;
 
 use Azuriom\Models\PrefixCatalog;
+use Azuriom\Models\PrefixCatalogImport;
 use Azuriom\Models\PrefixOperation;
 use Azuriom\Models\UserServerPrefix;
 use Azuriom\Services\Prefix\PrefixFormatter;
@@ -26,10 +27,16 @@ class PrefixCheckCommand extends Command
     {
         $ok = true;
 
-        $tables = ['prefix_catalog', 'user_server_prefixes', 'prefix_operations'];
+        $tables = ['prefix_catalog', 'user_server_prefixes', 'prefix_operations', 'prefix_catalog_imports'];
         foreach ($tables as $table) {
             $exists = Schema::hasTable($table);
             $this->line(($exists ? '[ok]  ' : '[MISS] ').'table '.$table);
+            $ok = $ok && $exists;
+        }
+
+        foreach (['server_id', 'source', 'auto_display_name', 'auto_prefix_raw', 'auto_sort', 'missing_since'] as $column) {
+            $exists = Schema::hasColumn('prefix_catalog', $column);
+            $this->line(($exists ? '[ok]  ' : '[MISS] ').'prefix_catalog.'.$column);
             $ok = $ok && $exists;
         }
 
@@ -39,11 +46,13 @@ class PrefixCheckCommand extends Command
 
         $routes = [
             'azlink prefixes report' => $this->findPath('prefixes/report'),
+            'azlink prefixes catalog' => $this->findPath('prefixes/catalog'),
             'azlink prefixes operations' => $this->findPath('prefixes/operations'),
             'azlink prefixes ack' => $this->findPath('prefixes/ack'),
             'profile.prefixes.select' => Route::has('profile.prefixes.select'),
             'admin.prefixes.index' => Route::has('admin.prefixes.index'),
             'admin.prefixes.operations' => Route::has('admin.prefixes.operations'),
+            'admin.prefixes.reset-auto' => Route::has('admin.prefixes.reset-auto'),
         ];
 
         foreach ($routes as $label => $present) {
@@ -72,6 +81,7 @@ class PrefixCheckCommand extends Command
 
         if ($ok && Schema::hasTable('prefix_catalog')) {
             $this->line('[info] catalog rows: '.PrefixCatalog::query()->count());
+            $this->line('[info] catalog imports: '.(Schema::hasTable('prefix_catalog_imports') ? PrefixCatalogImport::query()->count() : 0));
             $this->line('[info] user_server_prefixes rows: '.UserServerPrefix::query()->count());
             $this->line('[info] prefix_operations rows: '.PrefixOperation::query()->count());
         }

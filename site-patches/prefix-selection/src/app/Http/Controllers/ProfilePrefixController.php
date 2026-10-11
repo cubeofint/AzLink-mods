@@ -25,7 +25,6 @@ class ProfilePrefixController extends Controller
             $selection->select($request->user(), (int) $data['server_id'], $group, 'profile');
         } catch (RuntimeException $e) {
             $message = match ($e->getMessage()) {
-                'prefix_staff_locked' => trans('prefixes.cabinet.staff_locked'),
                 'prefix_not_synced' => trans('prefixes.cabinet.not_synced'),
                 'prefix_not_available' => trans('prefixes.cabinet.not_available'),
                 'prefix_disabled' => trans('prefixes.cabinet.disabled'),

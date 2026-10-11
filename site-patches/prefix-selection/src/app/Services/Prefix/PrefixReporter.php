@@ -7,6 +7,7 @@ use Illuminate\Support\Carbon;
 
 /**
  * Game → site snapshot. Last write wins per (user, server_id).
+ * Categories are stored as given; the cabinet only offers quest.
  */
 class PrefixReporter
 {
@@ -75,8 +76,8 @@ class PrefixReporter
                 continue;
             }
 
-            $category = (string) ($item['category'] ?? 'other');
-            if (! in_array($category, ['quest', 'donate', 'staff', 'other'], true)) {
+            $category = substr(trim((string) ($item['category'] ?? '')), 0, 16);
+            if ($category === '') {
                 $category = 'other';
             }
 

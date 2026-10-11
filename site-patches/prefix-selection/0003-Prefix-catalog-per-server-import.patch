@@ -1,0 +1,1808 @@
+From: mawleesys <alsoalberdo@gmail.com>
+Subject: [PATCH] Prefix catalog: per-server import, quest-only cabinet
+
+POST /api/azlink/prefixes/catalog, incremental migration (server_id + auto
+fields), quest-only cabinet, reporter stores categories as given, admin
+auto/manual + missing since + reset-to-auto. Does not rewrite 0001 tables.
+
+---
+diff --git a/app/Console/Commands/PrefixCheckCommand.php b/app/Console/Commands/PrefixCheckCommand.php
+index b593fea..e8f7773 100644
+--- a/app/Console/Commands/PrefixCheckCommand.php
++++ b/app/Console/Commands/PrefixCheckCommand.php
+@@ -3,6 +3,7 @@
+ namespace Azuriom\Console\Commands;
+ 
+ use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixCatalogImport;
+ use Azuriom\Models\PrefixOperation;
+ use Azuriom\Models\UserServerPrefix;
+ use Azuriom\Services\Prefix\PrefixFormatter;
+@@ -26,24 +27,32 @@ class PrefixCheckCommand extends Command
+     {
+         $ok = true;
+ 
+-        $tables = ['prefix_catalog', 'user_server_prefixes', 'prefix_operations'];
++        $tables = ['prefix_catalog', 'user_server_prefixes', 'prefix_operations', 'prefix_catalog_imports'];
+         foreach ($tables as $table) {
+             $exists = Schema::hasTable($table);
+             $this->line(($exists ? '[ok]  ' : '[MISS] ').'table '.$table);
+             $ok = $ok && $exists;
+         }
+ 
++        foreach (['server_id', 'source', 'auto_display_name', 'auto_prefix_raw', 'auto_sort', 'missing_since'] as $column) {
++            $exists = Schema::hasColumn('prefix_catalog', $column);
++            $this->line(($exists ? '[ok]  ' : '[MISS] ').'prefix_catalog.'.$column);
++            $ok = $ok && $exists;
++        }
++
+         $enabled = PrefixSelection::enabled();
+         $this->line('[info] prefixes.enabled = '.($enabled ? '1' : '0').' (endpoints 404 while off)');
+         $this->line('[info] prefixes.lease_seconds = '.(setting('prefixes.lease_seconds', 30)));
+ 
+         $routes = [
+             'azlink prefixes report' => $this->findPath('prefixes/report'),
++            'azlink prefixes catalog' => $this->findPath('prefixes/catalog'),
+             'azlink prefixes operations' => $this->findPath('prefixes/operations'),
+             'azlink prefixes ack' => $this->findPath('prefixes/ack'),
+             'profile.prefixes.select' => Route::has('profile.prefixes.select'),
+             'admin.prefixes.index' => Route::has('admin.prefixes.index'),
+             'admin.prefixes.operations' => Route::has('admin.prefixes.operations'),
++            'admin.prefixes.reset-auto' => Route::has('admin.prefixes.reset-auto'),
+         ];
+ 
+         foreach ($routes as $label => $present) {
+@@ -72,6 +81,7 @@ class PrefixCheckCommand extends Command
+ 
+         if ($ok && Schema::hasTable('prefix_catalog')) {
+             $this->line('[info] catalog rows: '.PrefixCatalog::query()->count());
++            $this->line('[info] catalog imports: '.(Schema::hasTable('prefix_catalog_imports') ? PrefixCatalogImport::query()->count() : 0));
+             $this->line('[info] user_server_prefixes rows: '.UserServerPrefix::query()->count());
+             $this->line('[info] prefix_operations rows: '.PrefixOperation::query()->count());
+         }
+diff --git a/app/Http/Controllers/Admin/PrefixCatalogController.php b/app/Http/Controllers/Admin/PrefixCatalogController.php
+index 30de587..1dbda96 100644
+--- a/app/Http/Controllers/Admin/PrefixCatalogController.php
++++ b/app/Http/Controllers/Admin/PrefixCatalogController.php
+@@ -4,6 +4,8 @@ namespace Azuriom\Http\Controllers\Admin;
+ 
+ use Azuriom\Http\Controllers\Controller;
+ use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixCatalogImport;
++use Azuriom\Models\Server;
+ use Azuriom\Services\Prefix\PrefixFormatter;
+ use Azuriom\Services\Prefix\PrefixSelection;
+ use Illuminate\Http\Request;
+@@ -11,22 +13,38 @@ use Illuminate\Validation\Rule;
+ 
+ class PrefixCatalogController extends Controller
+ {
+-    public function index(PrefixFormatter $formatter)
++    public function index(Request $request, PrefixFormatter $formatter)
+     {
+-        $items = PrefixCatalog::query()->orderBy('sort')->orderBy('group')->get();
++        $serverId = $request->input('server_id');
++
++        $query = PrefixCatalog::query()->with('server:id,name')->orderBy('sort')->orderBy('group');
++        if ($serverId === 'global') {
++            $query->whereNull('server_id');
++        } elseif (filled($serverId)) {
++            $query->where('server_id', (int) $serverId);
++        }
+ 
+         return view('admin.prefixes.index', [
+-            'items' => $items,
++            'items' => $query->get(),
+             'formatter' => $formatter,
+             'enabled' => PrefixSelection::enabled(),
++            'servers' => Server::query()->orderBy('position')->orderBy('name')->get(['id', 'name']),
++            'imports' => PrefixCatalogImport::query()->with('server:id,name')->orderByDesc('imported_at')->get(),
++            'serverId' => $serverId,
+         ]);
+     }
+ 
+     public function create(PrefixFormatter $formatter)
+     {
+         return view('admin.prefixes.form', [
+-            'item' => new PrefixCatalog(['enabled' => true, 'category' => 'other', 'sort' => 0]),
++            'item' => new PrefixCatalog([
++                'enabled' => true,
++                'category' => 'other',
++                'sort' => 0,
++                'source' => PrefixCatalog::SOURCE_MANUAL,
++            ]),
+             'formatter' => $formatter,
++            'servers' => Server::query()->orderBy('position')->orderBy('name')->get(['id', 'name']),
+         ]);
+     }
+ 
+@@ -43,6 +61,7 @@ class PrefixCatalogController extends Controller
+         return view('admin.prefixes.form', [
+             'item' => $prefix,
+             'formatter' => $formatter,
++            'servers' => Server::query()->orderBy('position')->orderBy('name')->get(['id', 'name']),
+         ]);
+     }
+ 
+@@ -62,24 +81,52 @@ class PrefixCatalogController extends Controller
+             ->with('success', trans('prefixes.admin.catalog.deleted'));
+     }
+ 
++    public function resetAuto(PrefixCatalog $prefix)
++    {
++        $prefix->resetToAuto();
++
++        return to_route('admin.prefixes.index')
++            ->with('success', trans('prefixes.admin.catalog.reset_auto'));
++    }
++
+     /**
+      * @return array<string, mixed>
+      */
+     private function validated(Request $request, ?PrefixCatalog $item = null): array
+     {
++        $serverId = $request->filled('server_id') ? (int) $request->input('server_id') : null;
++
++        $unique = Rule::unique('prefix_catalog', 'group')->ignore($item);
++        if ($serverId === null) {
++            $unique->whereNull('server_id');
++        } else {
++            $unique->where('server_id', $serverId);
++        }
++
+         $data = $this->validate($request, [
+-            'group' => [
+-                'required', 'string', 'max:64',
+-                Rule::unique('prefix_catalog', 'group')->ignore($item),
+-            ],
++            'server_id' => ['nullable', 'integer', Rule::exists('servers', 'id')],
++            'group' => ['required', 'string', 'max:64', $unique],
+             'display_name' => ['required', 'string', 'max:120'],
+             'prefix_raw' => ['nullable', 'string', 'max:255'],
+-            'category' => ['required', Rule::in(PrefixCatalog::CATEGORIES)],
++            'category' => ['required', 'string', 'max:16'],
+             'sort' => ['required', 'integer', 'min:0', 'max:999999'],
+             'enabled' => ['nullable', 'boolean'],
+         ]);
+ 
++        $data['server_id'] = $serverId;
+         $data['enabled'] = $request->boolean('enabled');
++        $data['source'] = $item?->source ?: PrefixCatalog::SOURCE_MANUAL;
++
++        if ($item === null) {
++            $data['override_display_name'] = true;
++            $data['override_sort'] = true;
++            $data['override_enabled'] = true;
++        } else {
++            $autoEnabled = $item->missing_since === null;
++            $data['override_display_name'] = $data['display_name'] !== (string) ($item->auto_display_name ?: '');
++            $data['override_sort'] = (int) $data['sort'] !== (int) $item->auto_sort;
++            $data['override_enabled'] = $data['enabled'] !== $autoEnabled;
++        }
+ 
+         return $data;
+     }
+diff --git a/app/Http/Controllers/Api/PrefixController.php b/app/Http/Controllers/Api/PrefixController.php
+index 4220d0a..b4d177e 100644
+--- a/app/Http/Controllers/Api/PrefixController.php
++++ b/app/Http/Controllers/Api/PrefixController.php
+@@ -3,15 +3,18 @@
+ namespace Azuriom\Http\Controllers\Api;
+ 
+ use Azuriom\Http\Controllers\Controller;
++use Azuriom\Services\Prefix\PrefixCatalogImporter;
+ use Azuriom\Services\Prefix\PrefixOperationQueue;
+ use Azuriom\Services\Prefix\PrefixReporter;
+ use Azuriom\Services\Prefix\PrefixSelection;
+ use Illuminate\Http\Request;
++use RuntimeException;
+ 
+ /**
+  * AzLink prefix sync. Disabled unless setting prefixes.enabled = 1.
+  *
+  * POST /api/azlink/prefixes/report
++ * POST /api/azlink/prefixes/catalog
+  * GET  /api/azlink/prefixes/operations
+  * POST /api/azlink/prefixes/ack
+  */
+@@ -38,6 +41,37 @@ class PrefixController extends Controller
+         return response()->json($result);
+     }
+ 
++    public function catalog(Request $request, PrefixCatalogImporter $importer)
++    {
++        abort_unless(PrefixSelection::enabled(), 404);
++
++        $data = $this->validate($request, [
++            'schema' => ['required'],
++            'hash' => ['required', 'string', 'max:64'],
++            'full' => ['required', 'boolean'],
++            'force' => ['nullable', 'boolean'],
++            'groups' => ['present', 'array', 'max:'.PrefixCatalogImporter::MAX_GROUPS],
++            'groups.*.group' => ['required', 'string', 'max:64'],
++            'groups.*.prefix_raw' => ['nullable', 'string', 'max:255'],
++            'groups.*.priority' => ['nullable', 'integer'],
++            'groups.*.track_index' => ['nullable', 'integer'],
++            'groups.*.display_name' => ['nullable', 'string', 'max:120'],
++            'groups.*.category' => ['nullable', 'string', 'max:16'],
++        ]);
++
++        try {
++            $result = $importer->import((int) $request->input('server-id'), $data);
++        } catch (RuntimeException $e) {
++            if ($e->getMessage() === 'prefix_catalog_force_required') {
++                return response()->json(['message' => 'force_required'], 409);
++            }
++
++            throw $e;
++        }
++
++        return response()->json($result);
++    }
++
+     public function operations(Request $request, PrefixOperationQueue $queue)
+     {
+         abort_unless(PrefixSelection::enabled(), 404);
+diff --git a/app/Http/Controllers/ProfilePrefixController.php b/app/Http/Controllers/ProfilePrefixController.php
+index 23a124e..357cd79 100644
+--- a/app/Http/Controllers/ProfilePrefixController.php
++++ b/app/Http/Controllers/ProfilePrefixController.php
+@@ -25,7 +25,6 @@ class ProfilePrefixController extends Controller
+             $selection->select($request->user(), (int) $data['server_id'], $group, 'profile');
+         } catch (RuntimeException $e) {
+             $message = match ($e->getMessage()) {
+-                'prefix_staff_locked' => trans('prefixes.cabinet.staff_locked'),
+                 'prefix_not_synced' => trans('prefixes.cabinet.not_synced'),
+                 'prefix_not_available' => trans('prefixes.cabinet.not_available'),
+                 'prefix_disabled' => trans('prefixes.cabinet.disabled'),
+diff --git a/app/Models/PrefixCatalog.php b/app/Models/PrefixCatalog.php
+index fd3fdc4..ffc9acf 100644
+--- a/app/Models/PrefixCatalog.php
++++ b/app/Models/PrefixCatalog.php
+@@ -4,38 +4,118 @@ namespace Azuriom\Models;
+ 
+ use Illuminate\Database\Eloquent\Builder;
+ use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++use Illuminate\Support\Collection;
+ 
+ /**
+- * Admin-managed display metadata for a chat prefix group key.
++ * Display metadata for a chat prefix group key, optionally scoped to a server.
++ *
++ * Visible display_name / sort / enabled follow an admin override when the
++ * matching override_* flag is set; otherwise they track the last auto import.
+  *
+  * @property int $id
++ * @property int|null $server_id
+  * @property string $group
+  * @property string $display_name
++ * @property string|null $auto_display_name
+  * @property string|null $prefix_raw
++ * @property string|null $auto_prefix_raw
+  * @property string $category
+  * @property int $sort
++ * @property int $auto_sort
++ * @property int $priority
+  * @property bool $enabled
++ * @property string $source
++ * @property bool $override_display_name
++ * @property bool $override_sort
++ * @property bool $override_enabled
++ * @property \Carbon\Carbon|null $last_seen_at
++ * @property \Carbon\Carbon|null $missing_since
+  */
+ class PrefixCatalog extends Model
+ {
+-    public const CATEGORIES = ['quest', 'donate', 'staff', 'other'];
++    public const CATEGORIES = ['quest', 'donate', 'staff', 'media', 'other'];
++
++    public const CATEGORY_QUEST = 'quest';
++
++    public const SOURCE_AUTO = 'auto';
++
++    public const SOURCE_MANUAL = 'manual';
+ 
+     protected $table = 'prefix_catalog';
+ 
+     protected $fillable = [
+-        'group', 'display_name', 'prefix_raw', 'category', 'sort', 'enabled',
++        'server_id', 'group', 'display_name', 'auto_display_name', 'prefix_raw',
++        'auto_prefix_raw', 'category', 'sort', 'auto_sort', 'priority', 'enabled',
++        'source', 'override_display_name', 'override_sort', 'override_enabled',
++        'last_seen_at', 'missing_since',
+     ];
+ 
+     protected $casts = [
+         'sort' => 'integer',
++        'auto_sort' => 'integer',
++        'priority' => 'integer',
+         'enabled' => 'boolean',
++        'override_display_name' => 'boolean',
++        'override_sort' => 'boolean',
++        'override_enabled' => 'boolean',
++        'last_seen_at' => 'datetime',
++        'missing_since' => 'datetime',
+     ];
+ 
++    public function server(): BelongsTo
++    {
++        return $this->belongsTo(Server::class);
++    }
++
+     public function scopeEnabled(Builder $query): Builder
+     {
+         return $query->where('enabled', true);
+     }
+ 
++    public function isAuto(): bool
++    {
++        return $this->source === self::SOURCE_AUTO;
++    }
++
++    public function visibleDisplayName(): string
++    {
++        if ($this->override_display_name && filled($this->display_name)) {
++            return (string) $this->display_name;
++        }
++
++        return (string) ($this->auto_display_name ?: $this->display_name ?: $this->group);
++    }
++
++    public function visiblePrefixRaw(): ?string
++    {
++        return $this->auto_prefix_raw !== null && $this->auto_prefix_raw !== ''
++            ? $this->auto_prefix_raw
++            : $this->prefix_raw;
++    }
++
++    public function visibleSort(): int
++    {
++        return $this->override_sort ? (int) $this->sort : (int) ($this->auto_sort ?: $this->sort);
++    }
++
++    public function visibleEnabled(): bool
++    {
++        return $this->override_enabled ? (bool) $this->enabled : (bool) $this->enabled;
++    }
++
++    public function resetToAuto(): void
++    {
++        $this->override_display_name = false;
++        $this->override_sort = false;
++        $this->override_enabled = false;
++        $this->display_name = $this->auto_display_name ?: $this->display_name;
++        $this->prefix_raw = $this->auto_prefix_raw ?: $this->prefix_raw;
++        $this->sort = (int) $this->auto_sort;
++        $this->enabled = $this->missing_since === null;
++        $this->save();
++    }
++
+     public static function categoryLabel(string $category): string
+     {
+         $key = 'prefixes.categories.'.$category;
+@@ -43,4 +123,48 @@ class PrefixCatalog extends Model
+ 
+         return $label === $key ? $category : $label;
+     }
++
++    public static function isQuestCategory(?string $category): bool
++    {
++        return strtolower((string) $category) === self::CATEGORY_QUEST;
++    }
++
++    /**
++     * Server-specific row wins; fall back to the global (server_id NULL) row.
++     *
++     * @param  Collection<int, self>|null  $rows
++     */
++    public static function resolveForServer(int $serverId, string $group, ?Collection $rows = null): ?self
++    {
++        $pool = $rows ?? static::query()->where('group', $group)
++            ->where(function (Builder $query) use ($serverId) {
++                $query->where('server_id', $serverId)->orWhereNull('server_id');
++            })
++            ->get();
++
++        return $pool->first(fn (self $row) => (int) $row->server_id === $serverId && $row->group === $group)
++            ?? $pool->first(fn (self $row) => $row->server_id === null && $row->group === $group);
++    }
++
++    /**
++     * @return Collection<string, self> keyed by group
++     */
++    public static function mapForServer(int $serverId, ?Collection $all = null): Collection
++    {
++        $rows = $all ?? static::query()
++            ->where(function (Builder $query) use ($serverId) {
++                $query->where('server_id', $serverId)->orWhereNull('server_id');
++            })
++            ->get();
++
++        $map = collect();
++        foreach ($rows->whereNull('server_id') as $row) {
++            $map->put($row->group, $row);
++        }
++        foreach ($rows->where('server_id', $serverId) as $row) {
++            $map->put($row->group, $row);
++        }
++
++        return $map;
++    }
+ }
+diff --git a/app/Models/PrefixCatalogImport.php b/app/Models/PrefixCatalogImport.php
+new file mode 100644
+index 0000000..f41d1b7
+--- /dev/null
++++ b/app/Models/PrefixCatalogImport.php
+@@ -0,0 +1,35 @@
++<?php
++
++namespace Azuriom\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++/**
++ * Last accepted catalog export for one AzLink server.
++ *
++ * @property int $id
++ * @property int $server_id
++ * @property string|null $schema
++ * @property string $hash
++ * @property bool $full
++ * @property int $group_count
++ * @property \Carbon\Carbon $imported_at
++ */
++class PrefixCatalogImport extends Model
++{
++    protected $fillable = [
++        'server_id', 'schema', 'hash', 'full', 'group_count', 'imported_at',
++    ];
++
++    protected $casts = [
++        'full' => 'boolean',
++        'group_count' => 'integer',
++        'imported_at' => 'datetime',
++    ];
++
++    public function server(): BelongsTo
++    {
++        return $this->belongsTo(Server::class);
++    }
++}
+diff --git a/app/Services/Prefix/PrefixCatalogImporter.php b/app/Services/Prefix/PrefixCatalogImporter.php
+new file mode 100644
+index 0000000..b909c3b
+--- /dev/null
++++ b/app/Services/Prefix/PrefixCatalogImporter.php
+@@ -0,0 +1,238 @@
++<?php
++
++namespace Azuriom\Services\Prefix;
++
++use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixCatalogImport;
++use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\DB;
++use RuntimeException;
++
++/**
++ * Game → site LuckPerms track export. Per-server upsert; admin overrides stay.
++ */
++class PrefixCatalogImporter
++{
++    public const MAX_GROUPS = 256;
++
++    /**
++     * @param  array{schema?: mixed, hash: string, full?: mixed, force?: mixed, groups?: mixed}  $payload
++     * @return array<string, mixed>
++     */
++    public function import(int $serverId, array $payload): array
++    {
++        $hash = (string) ($payload['hash'] ?? '');
++        $schema = isset($payload['schema']) ? substr((string) $payload['schema'], 0, 32) : null;
++        $full = $this->truthy($payload['full'] ?? false);
++        $force = $this->truthy($payload['force'] ?? false);
++        $groups = $this->normalizeGroups($payload['groups'] ?? []);
++
++        $previous = PrefixCatalogImport::query()->where('server_id', $serverId)->first();
++        if ($previous !== null && hash_equals($previous->hash, $hash)) {
++            return [
++                'unchanged' => true,
++                'hash' => $hash,
++                'imported_at' => $previous->imported_at?->toIso8601String(),
++            ];
++        }
++
++        return DB::transaction(function () use ($serverId, $hash, $schema, $full, $force, $groups) {
++            $now = Carbon::now();
++            $incoming = collect($groups)->keyBy('group');
++            $existing = PrefixCatalog::query()
++                ->where('server_id', $serverId)
++                ->lockForUpdate()
++                ->get()
++                ->keyBy('group');
++
++            $wouldDisable = $existing
++                ->filter(fn (PrefixCatalog $row) => $row->missing_since === null && ! $incoming->has($row->group));
++
++            $this->assertMissingGuard($existing, $wouldDisable, $groups, $full, $force);
++
++            $created = 0;
++            $updated = 0;
++
++            foreach ($incoming as $group => $item) {
++                $row = $existing->get($group);
++                if ($row === null) {
++                    PrefixCatalog::query()->create($this->newAutoAttributes($serverId, $item, $now));
++                    $created++;
++
++                    continue;
++                }
++
++                $this->applyAutoUpdate($row, $item, $now);
++                $row->save();
++                $updated++;
++            }
++
++            $missing = 0;
++            if ($full && $groups !== []) {
++                foreach ($wouldDisable as $row) {
++                    if ($row->missing_since === null) {
++                        $row->missing_since = $now;
++                    }
++                    if (! $row->override_enabled) {
++                        $row->enabled = false;
++                    }
++                    $row->save();
++                    $missing++;
++                }
++            }
++
++            PrefixCatalogImport::query()->updateOrCreate(
++                ['server_id' => $serverId],
++                [
++                    'schema' => $schema,
++                    'hash' => $hash,
++                    'full' => $full,
++                    'group_count' => count($groups),
++                    'imported_at' => $now,
++                ]
++            );
++
++            return [
++                'unchanged' => false,
++                'hash' => $hash,
++                'created' => $created,
++                'updated' => $updated,
++                'missing' => $missing,
++                'imported_at' => $now->toIso8601String(),
++            ];
++        });
++    }
++
++    /**
++     * @param  \Illuminate\Support\Collection<string, PrefixCatalog>  $existing
++     * @param  \Illuminate\Support\Collection<string, PrefixCatalog>  $wouldDisable
++     * @param  list<array<string, mixed>>  $groups
++     */
++    private function assertMissingGuard($existing, $wouldDisable, array $groups, bool $full, bool $force): void
++    {
++        if (! $full || $groups === []) {
++            return;
++        }
++
++        $present = $existing->filter(fn (PrefixCatalog $row) => $row->missing_since === null)->count();
++        if ($present === 0) {
++            return;
++        }
++
++        if (($wouldDisable->count() / $present) > 0.5 && ! $force) {
++            throw new RuntimeException('prefix_catalog_force_required');
++        }
++    }
++
++    /**
++     * @param  array<string, mixed>  $item
++     * @return array<string, mixed>
++     */
++    private function newAutoAttributes(int $serverId, array $item, Carbon $now): array
++    {
++        $display = $item['display_name'] !== '' ? $item['display_name'] : $item['group'];
++        $sort = $item['track_index'];
++
++        return [
++            'server_id' => $serverId,
++            'group' => $item['group'],
++            'display_name' => $display,
++            'auto_display_name' => $display,
++            'prefix_raw' => $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null,
++            'auto_prefix_raw' => $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null,
++            'category' => $item['category'],
++            'sort' => $sort,
++            'auto_sort' => $sort,
++            'priority' => $item['priority'],
++            'enabled' => true,
++            'source' => PrefixCatalog::SOURCE_AUTO,
++            'override_display_name' => false,
++            'override_sort' => false,
++            'override_enabled' => false,
++            'last_seen_at' => $now,
++            'missing_since' => null,
++        ];
++    }
++
++    /**
++     * @param  array<string, mixed>  $item
++     */
++    private function applyAutoUpdate(PrefixCatalog $row, array $item, Carbon $now): void
++    {
++        $display = $item['display_name'] !== '' ? $item['display_name'] : $item['group'];
++        $sort = $item['track_index'];
++        $raw = $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null;
++
++        $row->auto_display_name = $display;
++        $row->auto_prefix_raw = $raw;
++        $row->auto_sort = $sort;
++        $row->priority = $item['priority'];
++        $row->category = $item['category'];
++        $row->last_seen_at = $now;
++        $row->missing_since = null;
++
++        if (! $row->override_display_name) {
++            $row->display_name = $display;
++        }
++        if (! $row->override_sort) {
++            $row->sort = $sort;
++        }
++        $row->prefix_raw = $raw;
++
++        if (! $row->override_enabled) {
++            $row->enabled = true;
++        }
++    }
++
++    /**
++     * @param  mixed  $groups
++     * @return list<array{group: string, prefix_raw: string, priority: int, track_index: int, display_name: string, category: string}>
++     */
++    public function normalizeGroups(mixed $groups): array
++    {
++        if (! is_array($groups)) {
++            return [];
++        }
++
++        $out = [];
++        $seen = [];
++        foreach ($groups as $item) {
++            if (! is_array($item) || ! filled($item['group'] ?? null)) {
++                continue;
++            }
++
++            $group = substr((string) $item['group'], 0, 64);
++            if ($group === '' || isset($seen[$group])) {
++                continue;
++            }
++            $seen[$group] = true;
++
++            $out[] = [
++                'group' => $group,
++                'prefix_raw' => substr((string) ($item['prefix_raw'] ?? ''), 0, 255),
++                'priority' => (int) ($item['priority'] ?? 0),
++                'track_index' => (int) ($item['track_index'] ?? 0),
++                'display_name' => substr((string) ($item['display_name'] ?? ''), 0, 120),
++                'category' => $this->normalizeCategory($item['category'] ?? null),
++            ];
++
++            if (count($out) >= self::MAX_GROUPS) {
++                break;
++            }
++        }
++
++        return $out;
++    }
++
++    private function normalizeCategory(mixed $category): string
++    {
++        $value = substr(trim((string) ($category ?? '')), 0, 16);
++
++        return $value !== '' ? $value : 'other';
++    }
++
++    private function truthy(mixed $value): bool
++    {
++        return filter_var($value, FILTER_VALIDATE_BOOLEAN);
++    }
++}
+diff --git a/app/Services/Prefix/PrefixReporter.php b/app/Services/Prefix/PrefixReporter.php
+index 1d30bcb..5f773ce 100644
+--- a/app/Services/Prefix/PrefixReporter.php
++++ b/app/Services/Prefix/PrefixReporter.php
+@@ -7,6 +7,7 @@ use Illuminate\Support\Carbon;
+ 
+ /**
+  * Game → site snapshot. Last write wins per (user, server_id).
++ * Categories are stored as given; the cabinet only offers quest.
+  */
+ class PrefixReporter
+ {
+@@ -75,8 +76,8 @@ class PrefixReporter
+                 continue;
+             }
+ 
+-            $category = (string) ($item['category'] ?? 'other');
+-            if (! in_array($category, ['quest', 'donate', 'staff', 'other'], true)) {
++            $category = substr(trim((string) ($item['category'] ?? '')), 0, 16);
++            if ($category === '') {
+                 $category = 'other';
+             }
+ 
+diff --git a/app/Services/Prefix/PrefixSelection.php b/app/Services/Prefix/PrefixSelection.php
+index 6c95450..e7c48bf 100644
+--- a/app/Services/Prefix/PrefixSelection.php
++++ b/app/Services/Prefix/PrefixSelection.php
+@@ -12,6 +12,9 @@ use RuntimeException;
+ 
+ /**
+  * Cabinet / admin view-model and the rules for creating a prefix_select op.
++ *
++ * Only quest-category groups are selectable. Donate / staff / media stay in game
++ * and are not part of the cabinet list.
+  */
+ class PrefixSelection
+ {
+@@ -51,7 +54,12 @@ class PrefixSelection
+             ->orderBy('name')
+             ->get();
+ 
+-        $catalog = PrefixCatalog::query()->get()->keyBy('group');
++        $catalogRows = PrefixCatalog::query()
++            ->where(function ($query) use ($ids) {
++                $query->whereNull('server_id')->orWhereIn('server_id', $ids);
++            })
++            ->get();
++
+         $pending = PrefixOperation::query()
+             ->where('user_id', $user->id)
+             ->where('status', PrefixOperation::PENDING)
+@@ -64,8 +72,9 @@ class PrefixSelection
+             ->unique('server_id')
+             ->keyBy('server_id');
+ 
+-        return $servers->map(function (Server $server) use ($rows, $catalog, $pending, $latest) {
++        return $servers->map(function (Server $server) use ($rows, $catalogRows, $pending, $latest) {
+             $row = $rows->get($server->id);
++            $catalog = PrefixCatalog::mapForServer($server->id, $catalogRows);
+ 
+             return [
+                 'server' => $server,
+@@ -81,6 +90,8 @@ class PrefixSelection
+     }
+ 
+     /**
++     * Quest groups only. Server catalog, then server_id NULL, then the player report.
++     *
+      * @param  Collection<string, PrefixCatalog>  $catalog
+      * @return Collection<int, array<string, mixed>>
+      */
+@@ -95,21 +106,27 @@ class PrefixSelection
+             }
+ 
+             $entry = $catalog->get($group);
++            $category = $entry?->category ?: (string) ($item['category'] ?? 'other');
++            if (! PrefixCatalog::isQuestCategory($category)) {
++                continue;
++            }
++
+             if ($entry !== null && ! $entry->enabled) {
+                 continue;
+             }
+ 
+-            $raw = $entry?->prefix_raw ?: (string) ($item['prefix_raw'] ?? '');
+-            $category = $entry?->category ?: (string) ($item['category'] ?? 'other');
++            $raw = $entry !== null
++                ? (string) ($entry->visiblePrefixRaw() ?: ($item['prefix_raw'] ?? ''))
++                : (string) ($item['prefix_raw'] ?? '');
+ 
+             $options->push([
+                 'group' => $group,
+-                'display_name' => $entry?->display_name ?: $group,
++                'display_name' => $entry !== null ? $entry->visibleDisplayName() : $group,
+                 'prefix_raw' => $raw,
+                 'preview' => $this->formatter->toHtml($raw),
+                 'category' => $category,
+                 'category_label' => PrefixCatalog::categoryLabel($category),
+-                'sort' => $entry?->sort ?? 1000,
++                'sort' => $entry !== null ? $entry->visibleSort() : 1000,
+                 'in_catalog' => $entry !== null,
+             ]);
+         }
+@@ -131,17 +148,19 @@ class PrefixSelection
+             throw new RuntimeException('prefix_not_synced');
+         }
+ 
+-        if ($source !== 'admin_reset' && $row->locked_staff) {
+-            throw new RuntimeException('prefix_staff_locked');
+-        }
+-
+         if ($group !== null && $group !== '') {
+-            $available = collect($row->available ?? [])->pluck('group')->filter()->all();
+-            if (! in_array($group, $available, true)) {
++            $available = collect($row->available ?? []);
++            $reported = $available->firstWhere('group', $group);
++            if ($reported === null) {
++                throw new RuntimeException('prefix_not_available');
++            }
++
++            $catalog = PrefixCatalog::resolveForServer($serverId, $group);
++            $category = $catalog?->category ?: (string) ($reported['category'] ?? 'other');
++            if (! PrefixCatalog::isQuestCategory($category)) {
+                 throw new RuntimeException('prefix_not_available');
+             }
+ 
+-            $catalog = PrefixCatalog::query()->where('group', $group)->first();
+             if ($catalog !== null && ! $catalog->enabled) {
+                 throw new RuntimeException('prefix_disabled');
+             }
+diff --git a/database/migrations/2026_10_11_100000_add_prefix_catalog_per_server_import.php b/database/migrations/2026_10_11_100000_add_prefix_catalog_per_server_import.php
+new file mode 100644
+index 0000000..daac7cd
+--- /dev/null
++++ b/database/migrations/2026_10_11_100000_add_prefix_catalog_per_server_import.php
+@@ -0,0 +1,89 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        if (Schema::hasTable('prefix_catalog') && ! Schema::hasColumn('prefix_catalog', 'server_id')) {
++            Schema::table('prefix_catalog', function (Blueprint $table) {
++                $table->dropUnique(['group']);
++            });
++
++            Schema::table('prefix_catalog', function (Blueprint $table) {
++                $table->unsignedInteger('server_id')->nullable()->after('id');
++                $table->string('auto_display_name', 120)->nullable()->after('display_name');
++                $table->string('auto_prefix_raw', 255)->nullable()->after('prefix_raw');
++                $table->unsignedInteger('auto_sort')->default(0)->after('sort');
++                $table->integer('priority')->default(0)->after('auto_sort');
++                $table->string('source', 16)->default('manual')->after('enabled');
++                $table->boolean('override_display_name')->default(false)->after('source');
++                $table->boolean('override_sort')->default(false)->after('override_display_name');
++                $table->boolean('override_enabled')->default(false)->after('override_sort');
++                $table->timestamp('last_seen_at')->nullable()->after('override_enabled');
++                $table->timestamp('missing_since')->nullable()->after('last_seen_at');
++
++                $table->unique(['server_id', 'group']);
++                $table->index(['server_id', 'enabled', 'category']);
++                $table->foreign('server_id')->references('id')->on('servers')->nullOnDelete();
++            });
++
++            DB::table('prefix_catalog')->update([
++                'server_id' => null,
++                'source' => 'manual',
++                'auto_display_name' => DB::raw('display_name'),
++                'auto_prefix_raw' => DB::raw('prefix_raw'),
++                'auto_sort' => DB::raw('sort'),
++            ]);
++        }
++
++        if (! Schema::hasTable('prefix_catalog_imports')) {
++            Schema::create('prefix_catalog_imports', function (Blueprint $table) {
++                $table->id();
++                $table->unsignedInteger('server_id')->unique();
++                $table->string('schema', 32)->nullable();
++                $table->string('hash', 64);
++                $table->boolean('full')->default(false);
++                $table->unsignedInteger('group_count')->default(0);
++                $table->timestamp('imported_at');
++                $table->timestamps();
++
++                $table->foreign('server_id')->references('id')->on('servers')->cascadeOnDelete();
++            });
++        }
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('prefix_catalog_imports');
++
++        if (Schema::hasTable('prefix_catalog') && Schema::hasColumn('prefix_catalog', 'server_id')) {
++            Schema::table('prefix_catalog', function (Blueprint $table) {
++                $table->dropForeign(['server_id']);
++                $table->dropUnique(['server_id', 'group']);
++                $table->dropIndex(['server_id', 'enabled', 'category']);
++                $table->dropColumn([
++                    'server_id',
++                    'auto_display_name',
++                    'auto_prefix_raw',
++                    'auto_sort',
++                    'priority',
++                    'source',
++                    'override_display_name',
++                    'override_sort',
++                    'override_enabled',
++                    'last_seen_at',
++                    'missing_since',
++                ]);
++            });
++
++            Schema::table('prefix_catalog', function (Blueprint $table) {
++                $table->unique('group');
++            });
++        }
++    }
++};
+diff --git a/resources/lang/ru/prefixes.php b/resources/lang/ru/prefixes.php
+index c7cb2c3..8c5d492 100644
+--- a/resources/lang/ru/prefixes.php
++++ b/resources/lang/ru/prefixes.php
+@@ -5,6 +5,7 @@ return [
+         'quest' => 'Квест',
+         'donate' => 'Донат',
+         'staff' => 'Стафф',
++        'media' => 'Медиа',
+         'other' => 'Другое',
+     ],
+ 
+@@ -16,7 +17,8 @@ return [
+ 
+     'cabinet' => [
+         'title' => 'Префиксы',
+-        'intro' => 'Выберите префикс для чата на каждом сервере. Список приходит из игры.',
++        'intro' => 'Выберите квестовый префикс для чата на каждом сервере. Список приходит из игры.',
++        'always_shown' => 'Донатные и служебные префиксы отображаются всегда',
+         'empty' => 'Пока нет данных с серверов. Зайдите в игру — доступные префиксы появятся после синхронизации.',
+         'server' => 'Сервер',
+         'current' => 'Текущий префикс',
+@@ -46,6 +48,8 @@ return [
+             'created' => 'Запись каталога создана.',
+             'updated' => 'Запись каталога сохранена.',
+             'deleted' => 'Запись каталога удалена.',
++            'reset_auto' => 'Оверрайды сброшены, значения из авто-экспорта.',
++            'reset_auto_btn' => 'Сбросить на авто',
+             'group' => 'Ключ группы',
+             'display_name' => 'Название',
+             'prefix_raw' => 'Превью (MiniMessage / legacy)',
+@@ -55,6 +59,18 @@ return [
+             'preview' => 'Превью',
+             'empty' => 'Каталог пуст.',
+             'flag_off' => 'Синхронизация выключена (настройка prefixes.enabled). Кабинет и AzLink-эндпоинты отвечают 404, пока флаг выключен.',
++            'source' => 'Источник',
++            'source_auto' => 'авто',
++            'source_manual' => 'ручной',
++            'missing_since' => 'Пропал с',
++            'last_export' => 'Последний экспорт с серверов',
++            'imported_at' => 'Импортирован',
++            'hash' => 'Хеш',
++            'groups' => 'Групп',
++            'global' => 'Общий каталог',
++            'override' => 'оверрайд',
++            'auto_value' => 'Авто',
++            'override_hint' => 'Поля, которые отличаются от авто-экспорта, считаются ручным оверрайдом и не затираются импортом.',
+         ],
+         'ops' => [
+             'title' => 'Журнал операций префиксов',
+diff --git a/resources/themes/coints/views/profile/_prefixes.blade.php b/resources/themes/coints/views/profile/_prefixes.blade.php
+index b8168e8..e1d1436 100644
+--- a/resources/themes/coints/views/profile/_prefixes.blade.php
++++ b/resources/themes/coints/views/profile/_prefixes.blade.php
+@@ -13,7 +13,8 @@
+         </h2>
+     </div>
+     <div class="profile-hub-card-body">
+-        <p class="text-muted mb-3">{{ trans('prefixes.cabinet.intro') }}</p>
++        <p class="text-muted mb-2">{{ trans('prefixes.cabinet.intro') }}</p>
++        <p class="small text-muted mb-3">{{ trans('prefixes.cabinet.always_shown') }}</p>
+ 
+         @if($prefixServers->isEmpty())
+             <p class="text-muted mb-0">{{ trans('prefixes.cabinet.empty') }}</p>
+@@ -62,10 +63,6 @@
+                                 @endif
+                             </p>
+ 
+-                            @if($block['locked_staff'])
+-                                <div class="alert alert-warning py-2">{{ trans('prefixes.cabinet.staff_locked') }}</div>
+-                            @endif
+-
+                             @if($pending)
+                                 <div class="alert alert-info py-2">
+                                     {{ trans('prefixes.status.pending') }}:
+@@ -92,8 +89,6 @@
+                                         <td class="text-end" style="width: 8rem">
+                                             @if($block['selected'] === null && ! $pending)
+                                                 <span class="badge text-bg-success">{{ trans('prefixes.cabinet.selected') }}</span>
+-                                            @elseif($block['locked_staff'])
+-                                                <span class="text-muted small">{{ trans('prefixes.cabinet.staff_locked') }}</span>
+                                             @else
+                                                 <form action="{{ $selectRoute }}" method="POST" class="d-inline">
+                                                     @csrf
+@@ -118,8 +113,6 @@
+                                             <td class="text-end">
+                                                 @if($block['selected'] === $option['group'] && ! $pending)
+                                                     <span class="badge text-bg-success">{{ trans('prefixes.cabinet.selected') }}</span>
+-                                                @elseif($block['locked_staff'])
+-                                                    <span class="text-muted small">{{ trans('prefixes.cabinet.staff_locked') }}</span>
+                                                 @else
+                                                     <form action="{{ $selectRoute }}" method="POST" class="d-inline">
+                                                         @csrf
+diff --git a/resources/views/admin/prefixes/form.blade.php b/resources/views/admin/prefixes/form.blade.php
+index b9f4807..722a9f7 100644
+--- a/resources/views/admin/prefixes/form.blade.php
++++ b/resources/views/admin/prefixes/form.blade.php
+@@ -21,6 +21,21 @@
+                     @method('PUT')
+                 @endif
+ 
++                <div class="mb-3">
++                    <label class="form-label" for="serverInput">{{ trans('prefixes.admin.ops.server') }}</label>
++                    <select class="form-select @error('server_id') is-invalid @enderror" id="serverInput" name="server_id">
++                        <option value="">{{ trans('prefixes.admin.catalog.global') }}</option>
++                        @foreach($servers as $server)
++                            <option value="{{ $server->id }}" @selected((string) old('server_id', $item->server_id) === (string) $server->id)>
++                                {{ $server->name }}
++                            </option>
++                        @endforeach
++                    </select>
++                    @error('server_id')
++                        <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                    @enderror
++                </div>
++
+                 <div class="mb-3">
+                     <label class="form-label" for="groupInput">{{ trans('prefixes.admin.catalog.group') }}</label>
+                     <input type="text" class="form-control @error('group') is-invalid @enderror" id="groupInput"
+@@ -37,6 +52,9 @@
+                     @error('display_name')
+                         <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
+                     @enderror
++                    @if($item->auto_display_name)
++                        <div class="form-text">{{ trans('prefixes.admin.catalog.auto_value') }}: {{ $item->auto_display_name }}</div>
++                    @endif
+                 </div>
+ 
+                 <div class="mb-3">
+@@ -48,15 +66,22 @@
+                     @enderror
+                     <div class="form-text mt-2">
+                         {{ trans('prefixes.admin.catalog.preview') }}:
+-                        <span id="prefixPreview">{!! $formatter->toHtml(old('prefix_raw', $item->prefix_raw)) !!}</span>
++                        <span id="prefixPreview">{!! $formatter->toHtml(old('prefix_raw', $item->visiblePrefixRaw())) !!}</span>
+                     </div>
+                 </div>
+ 
+                 <div class="mb-3">
+                     <label class="form-label" for="categoryInput">{{ trans('prefixes.admin.catalog.category') }}</label>
+                     <select class="form-select @error('category') is-invalid @enderror" id="categoryInput" name="category" required>
+-                        @foreach(\Azuriom\Models\PrefixCatalog::CATEGORIES as $category)
+-                            <option value="{{ $category }}" @selected(old('category', $item->category) === $category)>
++                        @php
++                            $currentCategory = old('category', $item->category);
++                            $categoryOptions = \Azuriom\Models\PrefixCatalog::CATEGORIES;
++                            if ($currentCategory && ! in_array($currentCategory, $categoryOptions, true)) {
++                                $categoryOptions[] = $currentCategory;
++                            }
++                        @endphp
++                        @foreach($categoryOptions as $category)
++                            <option value="{{ $category }}" @selected($currentCategory === $category)>
+                                 {{ \Azuriom\Models\PrefixCatalog::categoryLabel($category) }}
+                             </option>
+                         @endforeach
+@@ -73,6 +98,9 @@
+                     @error('sort')
+                         <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
+                     @enderror
++                    @if($item->exists)
++                        <div class="form-text">{{ trans('prefixes.admin.catalog.auto_value') }}: {{ $item->auto_sort }}</div>
++                    @endif
+                 </div>
+ 
+                 <div class="form-check mb-3">
+@@ -81,6 +109,10 @@
+                     <label class="form-check-label" for="enabledInput">{{ trans('prefixes.admin.catalog.enabled') }}</label>
+                 </div>
+ 
++                @if($item->exists && ($item->override_display_name || $item->override_sort || $item->override_enabled))
++                    <p class="small text-muted">{{ trans('prefixes.admin.catalog.override_hint') }}</p>
++                @endif
++
+                 <button type="submit" class="btn btn-primary">{{ trans('messages.actions.save') }}</button>
+                 <a href="{{ route('admin.prefixes.index') }}" class="btn btn-secondary">{{ trans('messages.actions.cancel') }}</a>
+             </form>
+diff --git a/resources/views/admin/prefixes/index.blade.php b/resources/views/admin/prefixes/index.blade.php
+index a3d07ba..5b5ba6f 100644
+--- a/resources/views/admin/prefixes/index.blade.php
++++ b/resources/views/admin/prefixes/index.blade.php
+@@ -16,6 +16,38 @@
+         <div class="alert alert-info">{{ trans('prefixes.admin.catalog.flag_off') }}</div>
+     @endunless
+ 
++    @if($imports->isNotEmpty())
++        <div class="card shadow mb-4">
++            <div class="card-header">
++                <h5 class="card-title mb-0">{{ trans('prefixes.admin.catalog.last_export') }}</h5>
++            </div>
++            <div class="card-body">
++                <div class="table-responsive">
++                    <table class="table table-sm mb-0">
++                        <thead>
++                        <tr>
++                            <th>{{ trans('prefixes.admin.ops.server') }}</th>
++                            <th>{{ trans('prefixes.admin.catalog.imported_at') }}</th>
++                            <th>{{ trans('prefixes.admin.catalog.hash') }}</th>
++                            <th>{{ trans('prefixes.admin.catalog.groups') }}</th>
++                        </tr>
++                        </thead>
++                        <tbody>
++                        @foreach($imports as $import)
++                            <tr>
++                                <td>{{ $import->server?->name ?? ('#'.$import->server_id) }}</td>
++                                <td>{{ format_date($import->imported_at, true) }}</td>
++                                <td><code>{{ \Illuminate\Support\Str::limit($import->hash, 12, '…') }}</code></td>
++                                <td>{{ $import->group_count }}</td>
++                            </tr>
++                        @endforeach
++                        </tbody>
++                    </table>
++                </div>
++            </div>
++        </div>
++    @endif
++
+     <div class="card shadow mb-4">
+         <div class="card-header d-flex align-items-center justify-content-between">
+             <h5 class="card-title mb-0">{{ trans('prefixes.admin.catalog.title') }}</h5>
+@@ -24,15 +56,31 @@
+             </a>
+         </div>
+         <div class="card-body">
++            <form method="GET" class="row g-3 mb-4">
++                <div class="col-md-4">
++                    <label class="form-label" for="catalogServerInput">{{ trans('prefixes.admin.ops.server') }}</label>
++                    <select class="form-select" id="catalogServerInput" name="server_id" onchange="this.form.submit()">
++                        <option value="">{{ trans('messages.all') ?? '—' }}</option>
++                        <option value="global" @selected($serverId === 'global')>{{ trans('prefixes.admin.catalog.global') }}</option>
++                        @foreach($servers as $server)
++                            <option value="{{ $server->id }}" @selected((string) $serverId === (string) $server->id)>{{ $server->name }}</option>
++                        @endforeach
++                    </select>
++                </div>
++            </form>
++
+             <div class="table-responsive">
+                 <table class="table table-striped align-middle">
+                     <thead>
+                     <tr>
++                        <th>{{ trans('prefixes.admin.ops.server') }}</th>
+                         <th>{{ trans('prefixes.admin.catalog.group') }}</th>
+                         <th>{{ trans('prefixes.admin.catalog.display_name') }}</th>
+                         <th>{{ trans('prefixes.admin.catalog.preview') }}</th>
+                         <th>{{ trans('prefixes.admin.catalog.category') }}</th>
+                         <th>{{ trans('prefixes.admin.catalog.sort') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.source') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.missing_since') }}</th>
+                         <th>{{ trans('prefixes.admin.catalog.enabled') }}</th>
+                         <th class="text-end"></th>
+                     </tr>
+@@ -40,16 +88,40 @@
+                     <tbody>
+                     @forelse($items as $item)
+                         <tr>
++                            <td>{{ $item->server?->name ?? trans('prefixes.admin.catalog.global') }}</td>
+                             <td><code>{{ $item->group }}</code></td>
+-                            <td>{{ $item->display_name }}</td>
+-                            <td>{!! $formatter->toHtml($item->prefix_raw) !!}</td>
++                            <td>
++                                {{ $item->visibleDisplayName() }}
++                                @if($item->override_display_name)
++                                    <span class="badge text-bg-warning">{{ trans('prefixes.admin.catalog.override') }}</span>
++                                @endif
++                            </td>
++                            <td>{!! $formatter->toHtml($item->visiblePrefixRaw()) !!}</td>
+                             <td>{{ \Azuriom\Models\PrefixCatalog::categoryLabel($item->category) }}</td>
+-                            <td>{{ $item->sort }}</td>
++                            <td>{{ $item->visibleSort() }}</td>
++                            <td>
++                                {{ $item->isAuto() ? trans('prefixes.admin.catalog.source_auto') : trans('prefixes.admin.catalog.source_manual') }}
++                            </td>
++                            <td>
++                                @if($item->missing_since)
++                                    {{ format_date($item->missing_since, true) }}
++                                @else
++                                    —
++                                @endif
++                            </td>
+                             <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
+                             <td class="text-end">
+                                 <a href="{{ route('admin.prefixes.edit', $item) }}" class="btn btn-sm btn-outline-primary">
+                                     {{ trans('messages.actions.edit') }}
+                                 </a>
++                                @if($item->override_display_name || $item->override_sort || $item->override_enabled)
++                                    <form action="{{ route('admin.prefixes.reset-auto', $item) }}" method="POST" class="d-inline">
++                                        @csrf
++                                        <button type="submit" class="btn btn-sm btn-outline-secondary">
++                                            {{ trans('prefixes.admin.catalog.reset_auto_btn') }}
++                                        </button>
++                                    </form>
++                                @endif
+                                 <form action="{{ route('admin.prefixes.destroy', $item) }}" method="POST" class="d-inline"
+                                       onsubmit="return confirm(@json(trans('messages.actions.confirm') ?? 'OK'))">
+                                     @csrf
+@@ -60,7 +132,7 @@
+                         </tr>
+                     @empty
+                         <tr>
+-                            <td colspan="7" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
++                            <td colspan="10" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
+                         </tr>
+                     @endforelse
+                     </tbody>
+diff --git a/resources/views/admin/users/_prefixes.blade.php b/resources/views/admin/users/_prefixes.blade.php
+index 36df675..bacca19 100644
+--- a/resources/views/admin/users/_prefixes.blade.php
++++ b/resources/views/admin/users/_prefixes.blade.php
+@@ -33,9 +33,6 @@
+                             <tr>
+                                 <td>{{ $block['server']->name }}</td>
+                                 <td>
+-                                    @if($block['locked_staff'])
+-                                        <div class="text-warning small">{{ trans('prefixes.admin.user.locked') }}</div>
+-                                    @endif
+                                     @if($block['selected'])
+                                         @php $current = $block['options']->firstWhere('group', $block['selected']); @endphp
+                                         @if($current)
+diff --git a/resources/views/profile/_prefixes.blade.php b/resources/views/profile/_prefixes.blade.php
+index 26a84e2..feb8d9a 100644
+--- a/resources/views/profile/_prefixes.blade.php
++++ b/resources/views/profile/_prefixes.blade.php
+@@ -10,12 +10,10 @@
+ <div class="card mb-4">
+     <div class="card-header">{{ trans('prefixes.cabinet.title') }}</div>
+     <div class="card-body">
+-        <p class="text-muted">{{ trans('prefixes.cabinet.intro') }}</p>
++        <p class="text-muted mb-1">{{ trans('prefixes.cabinet.intro') }}</p>
++        <p class="small text-muted">{{ trans('prefixes.cabinet.always_shown') }}</p>
+         @forelse($prefixServers as $block)
+             <h6>{{ $block['server']->name }}</h6>
+-            @if($block['locked_staff'])
+-                <div class="alert alert-warning py-2">{{ trans('prefixes.cabinet.staff_locked') }}</div>
+-            @endif
+             @if($block['row'] === null)
+                 <p class="text-muted">{{ trans('prefixes.cabinet.not_synced') }}</p>
+             @else
+@@ -27,14 +25,14 @@
+                     @csrf
+                     <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
+                     <input type="hidden" name="group" value="">
+-                    <button class="btn btn-sm btn-secondary" @disabled($block['pending'] || $block['locked_staff'])>{{ trans('prefixes.cabinet.auto') }}</button>
++                    <button class="btn btn-sm btn-secondary" @disabled($block['pending'])>{{ trans('prefixes.cabinet.auto') }}</button>
+                 </form>
+                 @foreach($block['options'] as $option)
+                     <form action="{{ $selectRoute }}" method="POST" class="mb-2">
+                         @csrf
+                         <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
+                         <input type="hidden" name="group" value="{{ $option['group'] }}">
+-                        <button class="btn btn-sm btn-primary" @disabled($block['pending'] || $block['locked_staff'])>
++                        <button class="btn btn-sm btn-primary" @disabled($block['pending'])>
+                             {!! $option['preview'] !!} {{ $option['display_name'] }}
+                         </button>
+                     </form>
+diff --git a/routes/admin.php b/routes/admin.php
+index 3a7be68..60f2d04 100644
+--- a/routes/admin.php
++++ b/routes/admin.php
+@@ -1,6 +1,9 @@
+ Route::get('/prefixes/operations', [PrefixOperationController::class, 'index'])
+     ->name('prefixes.operations')
+     ->middleware('can:admin.users');
++Route::post('/prefixes/{prefix}/reset-auto', [PrefixCatalogController::class, 'resetAuto'])
++    ->name('prefixes.reset-auto')
++    ->middleware('can:admin.users');
+ Route::resource('prefixes', PrefixCatalogController::class)
+     ->except('show')
+     ->middleware('can:admin.users');
+diff --git a/routes/api.php b/routes/api.php
+index 66d3577..02dfddc 100644
+--- a/routes/api.php
++++ b/routes/api.php
+@@ -1,5 +1,6 @@
+     Route::post('/coins/movements', [\Azuriom\Http\Controllers\Api\ServerMovementController::class, 'store']);
+     Route::post('/prefixes/report', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'report']);
++    Route::post('/prefixes/catalog', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'catalog']);
+     Route::get('/prefixes/operations', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'operations']);
+     Route::post('/prefixes/ack', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'ack']);
+     Route::post('/register', [ServerController::class, 'register']);
+diff --git a/tests/Feature/PrefixCatalogImportTest.php b/tests/Feature/PrefixCatalogImportTest.php
+new file mode 100644
+index 0000000..cf2a620
+--- /dev/null
++++ b/tests/Feature/PrefixCatalogImportTest.php
+@@ -0,0 +1,272 @@
++<?php
++
++namespace Tests\Feature;
++
++use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixCatalogImport;
++use Azuriom\Models\Server;
++use Azuriom\Models\Setting;
++use Azuriom\Services\Prefix\PrefixCatalogImporter;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use RuntimeException;
++use Tests\TestCase;
++
++/**
++ * Requires a booted Azuriom app (phpunit.xml + sqlite).
++ *
++ *   cd /var/www/main-site
++ *   php artisan test --filter=PrefixCatalogImportTest
++ */
++class PrefixCatalogImportTest extends TestCase
++{
++    use RefreshDatabase;
++
++    private Server $server;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        $this->server = Server::query()->create([
++            'name' => 'ATM10-Test',
++            'address' => '127.0.0.1',
++            'type' => 'mc-azlink',
++            'port' => 25565,
++            'data' => [],
++        ]);
++
++        Setting::updateSettings(['prefixes.enabled' => '1']);
++    }
++
++    public function test_overrides_are_preserved_on_upsert(): void
++    {
++        PrefixCatalog::query()->create([
++            'server_id' => $this->server->id,
++            'group' => 'miner',
++            'display_name' => 'Шахтёр (ручной)',
++            'auto_display_name' => 'miner',
++            'prefix_raw' => '&a[old]',
++            'auto_prefix_raw' => '&a[old]',
++            'category' => 'quest',
++            'sort' => 7,
++            'auto_sort' => 1,
++            'priority' => 0,
++            'enabled' => false,
++            'source' => PrefixCatalog::SOURCE_AUTO,
++            'override_display_name' => true,
++            'override_sort' => true,
++            'override_enabled' => true,
++        ]);
++
++        $result = $this->importer()->import($this->server->id, $this->payload('h1', [
++            $this->group('miner', '&a[Miner]', 3, 10, 'Miner', 'quest'),
++        ]));
++
++        $this->assertFalse($result['unchanged']);
++        $row = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first();
++        $this->assertSame('Шахтёр (ручной)', $row->display_name);
++        $this->assertSame('Miner', $row->auto_display_name);
++        $this->assertSame(7, $row->sort);
++        $this->assertSame(10, $row->auto_sort);
++        $this->assertFalse($row->enabled);
++        $this->assertTrue($row->override_display_name);
++        $this->assertTrue($row->override_sort);
++        $this->assertTrue($row->override_enabled);
++        $this->assertSame('&a[Miner]', $row->prefix_raw);
++        $this->assertSame('&a[Miner]', $row->auto_prefix_raw);
++        $this->assertNull($row->missing_since);
++        $this->assertSame('Шахтёр (ручной)', $row->visibleDisplayName());
++        $this->assertSame(7, $row->visibleSort());
++    }
++
++    public function test_missing_groups_from_full_export_are_disabled(): void
++    {
++        $this->importer()->import($this->server->id, $this->payload('h-full', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++            $this->group('farmer', '&e[F]', 2, 2, 'Farmer', 'quest'),
++        ]));
++
++        $second = $this->importer()->import($this->server->id, $this->payload('h-full-2', [
++            $this->group('miner', '&a[M2]', 1, 1, 'Miner', 'quest'),
++        ]));
++
++        $this->assertSame(1, $second['missing']);
++        $farmer = PrefixCatalog::query()->where('group', 'farmer')->first();
++        $this->assertNotNull($farmer->missing_since);
++        $this->assertFalse($farmer->enabled);
++        $miner = PrefixCatalog::query()->where('group', 'miner')->first();
++        $this->assertNull($miner->missing_since);
++        $this->assertTrue($miner->enabled);
++        $this->assertSame('&a[M2]', $miner->prefix_raw);
++    }
++
++    public function test_repeat_with_same_hash_is_idempotent(): void
++    {
++        $payload = $this->payload('same-hash', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++        ]);
++
++        $first = $this->importer()->import($this->server->id, $payload);
++        $this->assertFalse($first['unchanged']);
++        $this->assertSame(1, $first['created']);
++
++        PrefixCatalog::query()->where('group', 'miner')->update([
++            'display_name' => 'touched',
++            'override_display_name' => true,
++        ]);
++
++        $second = $this->importer()->import($this->server->id, $payload);
++        $this->assertTrue($second['unchanged']);
++        $this->assertSame(1, PrefixCatalog::query()->count());
++        $this->assertSame('touched', PrefixCatalog::query()->where('group', 'miner')->value('display_name'));
++        $this->assertSame(1, PrefixCatalogImport::query()->where('server_id', $this->server->id)->count());
++    }
++
++    public function test_empty_groups_or_partial_export_do_not_disable(): void
++    {
++        $this->importer()->import($this->server->id, $this->payload('seed', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++            $this->group('farmer', '&e[F]', 2, 2, 'Farmer', 'quest'),
++        ]));
++
++        $empty = $this->importer()->import($this->server->id, [
++            'schema' => 1,
++            'hash' => 'empty-full',
++            'full' => true,
++            'groups' => [],
++        ]);
++        $this->assertFalse($empty['unchanged']);
++        $this->assertSame(0, $empty['missing']);
++        $this->assertTrue(PrefixCatalog::query()->where('group', 'miner')->value('enabled'));
++        $this->assertTrue(PrefixCatalog::query()->where('group', 'farmer')->value('enabled'));
++        $this->assertNull(PrefixCatalog::query()->where('group', 'miner')->value('missing_since'));
++
++        $partial = $this->importer()->import($this->server->id, [
++            'schema' => 1,
++            'hash' => 'partial',
++            'full' => false,
++            'groups' => [$this->group('miner', '&a[M3]', 1, 3, 'Miner', 'quest')],
++        ]);
++        $this->assertSame(0, $partial['missing']);
++        $this->assertTrue(PrefixCatalog::query()->where('group', 'farmer')->value('enabled'));
++        $this->assertNull(PrefixCatalog::query()->where('group', 'farmer')->value('missing_since'));
++        $this->assertSame('&a[M3]', PrefixCatalog::query()->where('group', 'miner')->value('prefix_raw'));
++    }
++
++    public function test_majority_disappear_requires_force(): void
++    {
++        $this->importer()->import($this->server->id, $this->payload('base', [
++            $this->group('a', '&a[A]', 1, 1, 'A', 'quest'),
++            $this->group('b', '&a[B]', 2, 2, 'B', 'quest'),
++            $this->group('c', '&a[C]', 3, 3, 'C', 'quest'),
++        ]));
++
++        try {
++            $this->importer()->import($this->server->id, $this->payload('drop', [
++                $this->group('a', '&a[A]', 1, 1, 'A', 'quest'),
++            ]));
++            $this->fail('expected force_required');
++        } catch (RuntimeException $e) {
++            $this->assertSame('prefix_catalog_force_required', $e->getMessage());
++        }
++
++        $this->assertSame(3, PrefixCatalog::query()->where('server_id', $this->server->id)->where('enabled', true)->count());
++        $this->assertSame('base', PrefixCatalogImport::query()->where('server_id', $this->server->id)->value('hash'));
++
++        $forced = $this->importer()->import($this->server->id, $this->payload('drop', [
++            $this->group('a', '&a[A]', 1, 1, 'A', 'quest'),
++        ], force: true));
++        $this->assertSame(2, $forced['missing']);
++        $this->assertFalse(PrefixCatalog::query()->where('group', 'b')->value('enabled'));
++    }
++
++    public function test_returning_group_is_reenabled_unless_manually_disabled(): void
++    {
++        $this->importer()->import($this->server->id, $this->payload('all', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++            $this->group('staff', '&c[S]', 2, 2, 'Staff', 'staff'),
++        ]));
++        $this->importer()->import($this->server->id, $this->payload('gone', [
++            $this->group('staff', '&c[S]', 2, 2, 'Staff', 'staff'),
++        ], force: true));
++
++        PrefixCatalog::query()->where('group', 'staff')->update([
++            'enabled' => false,
++            'override_enabled' => true,
++        ]);
++
++        $this->importer()->import($this->server->id, $this->payload('back', [
++            $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
++            $this->group('staff', '&c[S]', 2, 2, 'Staff', 'staff'),
++        ]));
++
++        $miner = PrefixCatalog::query()->where('group', 'miner')->first();
++        $this->assertTrue($miner->enabled);
++        $this->assertNull($miner->missing_since);
++        $staff = PrefixCatalog::query()->where('group', 'staff')->first();
++        $this->assertFalse($staff->enabled);
++        $this->assertTrue($staff->override_enabled);
++        $this->assertNull($staff->missing_since);
++    }
++
++    public function test_existing_global_manual_row_is_not_rewritten(): void
++    {
++        PrefixCatalog::query()->create([
++            'server_id' => null,
++            'group' => 'miner',
++            'display_name' => 'Global miner',
++            'prefix_raw' => '&7[G]',
++            'category' => 'quest',
++            'sort' => 0,
++            'source' => PrefixCatalog::SOURCE_MANUAL,
++            'enabled' => true,
++        ]);
++
++        $this->importer()->import($this->server->id, $this->payload('srv', [
++            $this->group('miner', '&a[M]', 1, 4, 'Miner', 'quest'),
++        ]));
++
++        $this->assertSame(2, PrefixCatalog::query()->where('group', 'miner')->count());
++        $global = PrefixCatalog::query()->whereNull('server_id')->where('group', 'miner')->first();
++        $this->assertSame('Global miner', $global->display_name);
++        $this->assertSame(PrefixCatalog::SOURCE_MANUAL, $global->source);
++        $local = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first();
++        $this->assertSame(PrefixCatalog::SOURCE_AUTO, $local->source);
++        $this->assertSame(4, $local->auto_sort);
++    }
++
++    private function importer(): PrefixCatalogImporter
++    {
++        return app(PrefixCatalogImporter::class);
++    }
++
++    /**
++     * @param  list<array<string, mixed>>  $groups
++     * @return array<string, mixed>
++     */
++    private function payload(string $hash, array $groups, bool $force = false): array
++    {
++        return [
++            'schema' => 1,
++            'hash' => $hash,
++            'full' => true,
++            'force' => $force,
++            'groups' => $groups,
++        ];
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function group(string $group, string $raw, int $priority, int $track, string $name, string $category): array
++    {
++        return [
++            'group' => $group,
++            'prefix_raw' => $raw,
++            'priority' => $priority,
++            'track_index' => $track,
++            'display_name' => $name,
++            'category' => $category,
++        ];
++    }
++}
+diff --git a/tests/Feature/PrefixSelectionTest.php b/tests/Feature/PrefixSelectionTest.php
+index 21729d8..424837e 100644
+--- a/tests/Feature/PrefixSelectionTest.php
++++ b/tests/Feature/PrefixSelectionTest.php
+@@ -57,10 +57,12 @@ class PrefixSelectionTest extends TestCase
+             'uuid' => 'f3fc162d-d344-32fa-8c9a-0b987b0791cf',
+             'name' => 'Nick',
+             'available' => [
++                ['group' => 'miner', 'prefix_raw' => '&a[Шахтёр]', 'category' => 'quest'],
+                 ['group' => 'vip', 'prefix_raw' => '<gold>[VIP]</gold>', 'category' => 'donate'],
+                 ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'other'],
++                ['group' => 'media', 'prefix_raw' => '&b[YT]', 'category' => 'media'],
+             ],
+-            'selected' => 'vip',
++            'selected' => 'miner',
+             'locked_staff' => false,
+         ]]);
+ 
+@@ -68,8 +70,9 @@ class PrefixSelectionTest extends TestCase
+         $this->assertSame(0, $first['skipped']);
+ 
+         $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
+-        $this->assertSame('vip', $row->selected);
+-        $this->assertCount(2, $row->available);
++        $this->assertSame('miner', $row->selected);
++        $this->assertCount(4, $row->available);
++        $this->assertSame('media', $row->available[3]['category']);
+ 
+         $byName = User::factory()->create(['name' => 'OnlyName', 'game_id' => null]);
+         $second = $reporter->report($this->server->id, [[
+@@ -101,46 +104,84 @@ class PrefixSelectionTest extends TestCase
+     {
+         $this->seedSnapshot();
+ 
+-        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
++        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'miner', 'profile');
+ 
+         $this->assertSame(Op::TYPE_SELECT, $op->type);
+-        $this->assertSame('vip', $op->group);
++        $this->assertSame('miner', $op->group);
+         $this->assertSame(Op::PENDING, $op->status);
+-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+     }
+ 
+-    public function test_staff_locked_blocks_profile_select(): void
++    public function test_staff_can_select_quest_prefix(): void
+     {
+         $this->seedSnapshot(locked: true);
+ 
+-        $this->expectException(RuntimeException::class);
+-        $this->expectExceptionMessage('prefix_staff_locked');
+-        app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
++        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'miner', 'profile');
++        $this->assertSame('miner', $op->group);
++    }
++
++    public function test_cabinet_shows_only_quest_and_keeps_uncatalogued_quest(): void
++    {
++        $this->seedSnapshot();
++        PrefixCatalog::query()->create([
++            'server_id' => $this->server->id,
++            'group' => 'miner',
++            'display_name' => 'Шахтёр',
++            'prefix_raw' => '&a[Шахтёр]',
++            'category' => 'quest',
++            'sort' => 0,
++            'enabled' => true,
++        ]);
++
++        $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
++        $row->available = array_merge($row->available, [
++            ['group' => 'builder', 'prefix_raw' => '&b[Строитель]', 'category' => 'quest'],
++        ]);
++        $row->save();
++
++        $options = app(PrefixSelection::class)->visibleOptions(
++            $row,
++            PrefixCatalog::mapForServer($this->server->id)
++        );
++
++        $this->assertTrue($options->contains('group', 'miner'));
++        $this->assertTrue($options->contains('group', 'builder'));
++        $this->assertFalse($options->contains('group', 'vip'));
++        $this->assertFalse($options->contains('group', 'hidden'));
++        $this->assertFalse($options->contains('group', 'media'));
++        $this->assertSame('&b[Строитель]', $options->firstWhere('group', 'builder')['prefix_raw']);
++        $this->assertFalse($options->firstWhere('group', 'builder')['in_catalog']);
+     }
+ 
+-    public function test_disabled_catalog_entry_hidden_and_not_selectable(): void
++    public function test_disabled_quest_catalog_entry_hidden_and_not_selectable(): void
+     {
+         $this->seedSnapshot();
+         PrefixCatalog::query()->create([
++            'server_id' => $this->server->id,
+             'group' => 'hidden',
+             'display_name' => 'Hidden',
+             'prefix_raw' => '&8[X]',
+-            'category' => 'other',
++            'category' => 'quest',
+             'sort' => 1,
+             'enabled' => false,
+         ]);
+         PrefixCatalog::query()->create([
+-            'group' => 'vip',
+-            'display_name' => 'VIP',
+-            'prefix_raw' => '<gold>[VIP]</gold>',
+-            'category' => 'donate',
++            'group' => 'miner',
++            'display_name' => 'Шахтёр',
++            'prefix_raw' => '&a[Шахтёр]',
++            'category' => 'quest',
+             'sort' => 0,
+             'enabled' => true,
+         ]);
+ 
+         $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
+-        $options = app(PrefixSelection::class)->visibleOptions($row, PrefixCatalog::query()->get()->keyBy('group'));
+-        $this->assertTrue($options->contains('group', 'vip'));
++        $row->available = array_merge($row->available, [
++            ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'quest'],
++        ]);
++        $row->save();
++
++        $options = app(PrefixSelection::class)->visibleOptions($row, PrefixCatalog::mapForServer($this->server->id));
++        $this->assertTrue($options->contains('group', 'miner'));
+         $this->assertFalse($options->contains('group', 'hidden'));
+ 
+         $this->expectException(RuntimeException::class);
+@@ -148,28 +189,48 @@ class PrefixSelectionTest extends TestCase
+         app(PrefixSelection::class)->select($this->user, $this->server->id, 'hidden', 'profile');
+     }
+ 
++    public function test_reporter_stores_category_as_given(): void
++    {
++        $available = app(PrefixReporter::class)->normalizeAvailable([
++            ['group' => 'yt', 'prefix_raw' => '&b[YT]', 'category' => 'media'],
++            ['group' => 'custom', 'prefix_raw' => '&f[X]', 'category' => 'event'],
++        ]);
++
++        $this->assertSame('media', $available[0]['category']);
++        $this->assertSame('event', $available[1]['category']);
++    }
++
++    public function test_donate_prefix_is_not_selectable(): void
++    {
++        $this->seedSnapshot();
++
++        $this->expectException(RuntimeException::class);
++        $this->expectExceptionMessage('prefix_not_available');
++        app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
++    }
++
+     public function test_pending_lease_and_idempotent_ack(): void
+     {
+         $this->seedSnapshot();
+         $queue = app(PrefixOperationQueue::class);
+-        $op = $queue->enqueue($this->user, $this->server->id, 'vip', ['source' => 'profile']);
++        $op = $queue->enqueue($this->user, $this->server->id, 'miner', ['source' => 'profile']);
+ 
+         $first = $queue->pending($this->server->id, 50);
+         $this->assertCount(1, $first);
+         $this->assertSame($op->id, $first[0]['op_id']);
+         $this->assertSame('prefix_select', $first[0]['type']);
+-        $this->assertSame('vip', $first[0]['group']);
++        $this->assertSame('miner', $first[0]['group']);
+ 
+         $leased = $queue->pending($this->server->id, 50);
+         $this->assertCount(0, $leased);
+ 
+-        $ack = $queue->ack($this->server->id, $op->id, Op::APPLIED, null, 'vip');
++        $ack = $queue->ack($this->server->id, $op->id, Op::APPLIED, null, 'miner');
+         $this->assertSame(Op::APPLIED, $ack->status);
+-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+ 
+         $again = $queue->ack($this->server->id, $op->id, Op::REJECTED, 'ignored', null);
+         $this->assertSame(Op::APPLIED, $again->status);
+-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+     }
+ 
+     public function test_ack_rejected_keeps_previous_selection(): void
+@@ -177,9 +238,9 @@ class PrefixSelectionTest extends TestCase
+         $this->seedSnapshot();
+         $queue = app(PrefixOperationQueue::class);
+         $op = $queue->enqueue($this->user, $this->server->id, null, ['source' => 'admin_reset']);
+-        $queue->ack($this->server->id, $op->id, Op::REJECTED, 'staff_locked', 'vip');
++        $queue->ack($this->server->id, $op->id, Op::REJECTED, 'staff_locked', 'miner');
+ 
+-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+         $this->assertSame(Op::REJECTED, $op->fresh()->status);
+     }
+ 
+@@ -215,10 +276,11 @@ class PrefixSelectionTest extends TestCase
+             'user_id' => $this->user->id,
+             'server_id' => $this->server->id,
+             'available' => [
++                ['group' => 'miner', 'prefix_raw' => '&a[Шахтёр]', 'category' => 'quest'],
+                 ['group' => 'vip', 'prefix_raw' => '<gold>[VIP]</gold>', 'category' => 'donate'],
+                 ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'other'],
+             ],
+-            'selected' => 'vip',
++            'selected' => 'miner',
+             'locked_staff' => $locked,
+             'synced_at' => now(),
+         ]);

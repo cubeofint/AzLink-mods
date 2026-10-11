@@ -14,9 +14,9 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>cointcore reflects these <em>exact</em> names (also mirrored on
  * {@link com.azuriom.azlink.common.coins.CoinOperationsBridge}):
- * {@code postJson}, {@code getJson}, {@code reportPrefixes}, {@code fetchPrefixOperations},
- * {@code ackPrefix}. Paths are {@code /azlink/prefixes/...}; HttpClient prepends
- * {@code siteUrl + /api}.
+ * {@code postJson}, {@code getJson}, {@code reportPrefixes}, {@code reportPrefixCatalog},
+ * {@code fetchPrefixOperations}, {@code ackPrefix}. Paths are {@code /azlink/prefixes/...};
+ * HttpClient prepends {@code siteUrl + /api}.
  *
  * <p>Ack {@code status} is {@code applied} or {@code rejected}.
  */
@@ -74,6 +74,19 @@ public final class PrefixBridge {
         }
         JsonObject body = AzLinkPlugin.getGson().fromJson(json, JsonObject.class);
         return current.getHttpClient().reportPrefixes(body).thenApply(Object::toString);
+    }
+
+    /**
+     * Push a per-server LuckPerms track catalog.
+     * JSON {@code {"schema","hash","full","force"?,"groups":[{group,prefix_raw,priority,track_index,display_name,category}]}}.
+     */
+    public static CompletableFuture<String> reportPrefixCatalog(String json) {
+        AzLinkPlugin current = plugin;
+        if (!isAvailable()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("AzLink not configured"));
+        }
+        JsonObject body = AzLinkPlugin.getGson().fromJson(json, JsonObject.class);
+        return current.getHttpClient().reportPrefixCatalog(body).thenApply(Object::toString);
     }
 
     /** JSON {@code {"operations":[{op_id,type,uuid,group}...]}}. */

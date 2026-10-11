@@ -33,9 +33,6 @@
                             <tr>
                                 <td>{{ $block['server']->name }}</td>
                                 <td>
-                                    @if($block['locked_staff'])
-                                        <div class="text-warning small">{{ trans('prefixes.admin.user.locked') }}</div>
-                                    @endif
                                     @if($block['selected'])
                                         @php $current = $block['options']->firstWhere('group', $block['selected']); @endphp
                                         @if($current)

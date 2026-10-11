@@ -13,7 +13,8 @@
         </h2>
     </div>
     <div class="profile-hub-card-body">
-        <p class="text-muted mb-3">{{ trans('prefixes.cabinet.intro') }}</p>
+        <p class="text-muted mb-2">{{ trans('prefixes.cabinet.intro') }}</p>
+        <p class="small text-muted mb-3">{{ trans('prefixes.cabinet.always_shown') }}</p>
 
         @if($prefixServers->isEmpty())
             <p class="text-muted mb-0">{{ trans('prefixes.cabinet.empty') }}</p>
@@ -62,10 +63,6 @@
                                 @endif
                             </p>
 
-                            @if($block['locked_staff'])
-                                <div class="alert alert-warning py-2">{{ trans('prefixes.cabinet.staff_locked') }}</div>
-                            @endif
-
                             @if($pending)
                                 <div class="alert alert-info py-2">
                                     {{ trans('prefixes.status.pending') }}:
@@ -92,8 +89,6 @@
                                         <td class="text-end" style="width: 8rem">
                                             @if($block['selected'] === null && ! $pending)
                                                 <span class="badge text-bg-success">{{ trans('prefixes.cabinet.selected') }}</span>
-                                            @elseif($block['locked_staff'])
-                                                <span class="text-muted small">{{ trans('prefixes.cabinet.staff_locked') }}</span>
                                             @else
                                                 <form action="{{ $selectRoute }}" method="POST" class="d-inline">
                                                     @csrf
@@ -118,8 +113,6 @@
                                             <td class="text-end">
                                                 @if($block['selected'] === $option['group'] && ! $pending)
                                                     <span class="badge text-bg-success">{{ trans('prefixes.cabinet.selected') }}</span>
-                                                @elseif($block['locked_staff'])
-                                                    <span class="text-muted small">{{ trans('prefixes.cabinet.staff_locked') }}</span>
                                                 @else
                                                     <form action="{{ $selectRoute }}" method="POST" class="d-inline">
                                                         @csrf

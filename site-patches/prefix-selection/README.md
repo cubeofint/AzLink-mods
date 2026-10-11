@@ -15,7 +15,8 @@ direction). Prefixes use a dedicated `prefix_operations` table. Gluon visibility
 
 Game-side contract is implemented in parallel by cointcore. Keep it exact.
 The AzLink mod exposes the names cointcore reflects on **`CoinOperationsBridge`**
-(`postJson` / `getJson` / `reportPrefixes` / `fetchPrefixOperations` / `ackPrefix`)
+(`postJson` / `getJson` / `reportPrefixes` / `reportPrefixCatalog` /
+`fetchPrefixOperations` / `ackPrefix`)
 and the same methods on [`PrefixBridge`](../../common/src/main/java/com/azuriom/azlink/common/prefixes/PrefixBridge.java).
 HttpClient paths are `/azlink/prefixes/...` → site `/api/azlink/prefixes/...`.
 See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
@@ -25,13 +26,18 @@ See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
 - Tables: `prefix_catalog`, `user_server_prefixes`, `prefix_operations` (up/down).
 - AzLink API (`server.token`, same as other AzLink endpoints):
   - `POST /api/azlink/prefixes/report` `{players:[{uuid,name,available:[{group,prefix_raw,category}],selected,locked_staff}]}`
+  - `POST /api/azlink/prefixes/catalog` `{schema,hash,full,force?,groups:[{group,prefix_raw,priority,track_index,display_name,category}]}` (max 256)
   - `GET  /api/azlink/prefixes/operations` pending `prefix_select` `{op_id,type,uuid,group}` with lease
   - `POST /api/azlink/prefixes/ack` `{op_id,status:applied|rejected,reason,selected}` (idempotent)
 - Cabinet tab «Префиксы»: per-server pills, rendered preview (`&` / MiniMessage → HTML),
-  current selection, «Авто», select → queue, pending/applied/rejected, staff lock
-  «Префикс стаффа нельзя изменить». Disabled/hidden catalog rows are not shown.
-- Admin: catalog CRUD with preview, player prefixes per server + reset to Авто,
-  operation log.
+  current selection, «Авто», select → queue, pending/applied/rejected.
+  **Only `quest` groups are selectable.** Donate / staff / media stay in game
+  (`Донатные и служебные префиксы отображаются всегда`). Staff can pick a quest
+  prefix. A quest group with no catalog row is still shown from the player report.
+  Disabled catalog rows are not shown.
+- Admin: catalog CRUD with preview, auto/manual + missing since, server filter,
+  last export time per server, «Сбросить на авто», player prefixes per server +
+  reset to Авто, operation log.
 - Flag `prefixes.enabled` (default **off**, endpoints 404). `prefixes.lease_seconds` default `30`.
 - `php artisan prefixes:check` — read-only dry-run.
 
@@ -44,6 +50,20 @@ See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
 ```
 
 User link: `users.game_id` (dashed or undashed UUID), then exact `name`. Unknown players are skipped.
+`category` is stored as given (no hard list). The cabinet only offers `quest`.
+
+### Game → site: `POST /api/azlink/prefixes/catalog`
+
+```json
+{"schema":1,"hash":"abc123","full":true,"groups":[{"group":"miner","prefix_raw":"&a[Шахтёр]","priority":10,"track_index":3,"display_name":"Шахтёр","category":"quest"}]}
+```
+
+Per-server upsert by `(server_id, group)`. Updates only auto fields; visible
+`display_name` / `sort` / `enabled` keep an admin override when the matching flag
+is set. Same `hash` is a no-op. Empty `groups` or `full=false` disables nothing.
+A full export that would drop more than 50% of present groups needs `force: true`
+(otherwise `409 force_required`). Missing groups get `missing_since` +
+`enabled=false` (rows stay); they are re-enabled on return unless manually disabled.
 
 ### Site → game: `GET /api/azlink/prefixes/operations?limit=50`
 
@@ -68,11 +88,16 @@ User link: `users.game_id` (dashed or undashed UUID), then exact `name`. Unknown
 cd /var/www/main-site
 git apply /path/to/AzLink-mods/site-patches/prefix-selection/0001-Prefix-selection-schema-API-queue.patch
 git apply /path/to/AzLink-mods/site-patches/prefix-selection/0002-Prefix-selection-cabinet-admin.patch
+git apply /path/to/AzLink-mods/site-patches/prefix-selection/0003-Prefix-catalog-per-server-import.patch
 php artisan migrate --force
 php artisan prefixes:check
 # enable only when ready:
 # Setting::updateSettings(['prefixes.enabled' => '1']);
 ```
+
+`0001`+`0002` are the deployed prefix series. **`0003` is incremental** — it does
+not rewrite `2026_10_11_000000_create_prefix_selection_tables`. Existing
+`prefix_catalog` rows keep `server_id` NULL and `source=manual`.
 
 Optional: add `App\Providers\PrefixSelectionServiceProvider::class` to
 `bootstrap/providers.php` so the cabinet POST is also `/user/prefixes/select`.
@@ -87,17 +112,18 @@ Rollback: restore the changed files from the backup, then:
 php artisan migrate:rollback --step=1
 ```
 
-(`step=1` drops the three tables and the two settings). Flags can be set back to `0`
-without rollback.
+(`step=1` after `0003` drops the import columns / `prefix_catalog_imports` and
+restores `unique(group)`). Flags can be set back to `0` without rollback.
 
 ## Tests
 
 ```
 cd /var/www/main-site
 php artisan test --filter=PrefixSelectionTest
+php artisan test --filter=PrefixCatalogImportTest
 ```
 
-Run the file directly (`--filter` avoids unrelated existing tests). The series also adds `php artisan prefixes:check` for a no-write sanity pass
+Run the files directly (`--filter` avoids unrelated existing tests). The series also adds `php artisan prefixes:check` for a no-write sanity pass
 on the site. In this repo, `php check-formatter.php` (no Laravel) checks
 MiniMessage / legacy → HTML conversion.
 
@@ -105,3 +131,6 @@ MiniMessage / legacy → HTML conversion.
 
 1. `0001` — migrations, models, services, AzLink API + cabinet POST, artisan check, Feature tests.
 2. `0002` — cabinet tab, admin catalog/log/user reset, lang, theme partials, admin/profile route hunks.
+3. `0003` — per-server catalog import (`POST /api/azlink/prefixes/catalog`), quest-only
+   cabinet, reporter stores categories as given, admin auto/manual + missing since
+   + reset-to-auto + server filter. Incremental migration; does not rewrite `0001`.

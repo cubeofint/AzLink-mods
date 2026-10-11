@@ -76,6 +76,34 @@ class PrefixBridgePayloadTest {
     }
 
     @Test
+    void catalogPayloadMatchesContract() {
+        JsonObject group = new JsonObject();
+        group.addProperty("group", "miner");
+        group.addProperty("prefix_raw", "&a[Шахтёр]");
+        group.addProperty("priority", 10);
+        group.addProperty("track_index", 3);
+        group.addProperty("display_name", "Шахтёр");
+        group.addProperty("category", "quest");
+
+        JsonArray groups = new JsonArray();
+        groups.add(group);
+
+        JsonObject body = new JsonObject();
+        body.addProperty("schema", 1);
+        body.addProperty("hash", "abc123");
+        body.addProperty("full", true);
+        body.add("groups", groups);
+
+        JsonObject parsed = AzLinkPlugin.getGson().fromJson(body.toString(), JsonObject.class);
+        assertEquals("abc123", parsed.get("hash").getAsString());
+        assertTrue(parsed.get("full").getAsBoolean());
+        assertEquals("quest", parsed.getAsJsonArray("groups").get(0).getAsJsonObject()
+                .get("category").getAsString());
+        assertEquals(3, parsed.getAsJsonArray("groups").get(0).getAsJsonObject()
+                .get("track_index").getAsInt());
+    }
+
+    @Test
     void operationsPayloadIsPrefixSelect() {
         JsonObject op = new JsonObject();
         op.addProperty("op_id", "9b2f6c1e-3d4a-4e0b-8f6a-1c2d3e4f5a6b");
@@ -99,6 +127,7 @@ class PrefixBridgePayloadTest {
         assertPublicStatic(CoinOperationsBridge.class, "postJson", String.class, String.class);
         assertPublicStatic(CoinOperationsBridge.class, "getJson", String.class);
         assertPublicStatic(CoinOperationsBridge.class, "reportPrefixes", String.class);
+        assertPublicStatic(CoinOperationsBridge.class, "reportPrefixCatalog", String.class);
         assertPublicStatic(CoinOperationsBridge.class, "fetchPrefixOperations", int.class);
         assertPublicStatic(CoinOperationsBridge.class, "ackPrefix",
                 String.class, String.class, String.class, String.class);
@@ -106,6 +135,7 @@ class PrefixBridgePayloadTest {
         assertPublicStatic(PrefixBridge.class, "postJson", String.class, String.class);
         assertPublicStatic(PrefixBridge.class, "getJson", String.class);
         assertPublicStatic(PrefixBridge.class, "reportPrefixes", String.class);
+        assertPublicStatic(PrefixBridge.class, "reportPrefixCatalog", String.class);
         assertPublicStatic(PrefixBridge.class, "fetchPrefixOperations", int.class);
         assertPublicStatic(PrefixBridge.class, "ackPrefix",
                 String.class, String.class, String.class, String.class);
@@ -113,6 +143,7 @@ class PrefixBridgePayloadTest {
         assertEquals(CompletableFuture.class, HttpClient.class.getMethod(
                 "ackPrefix", String.class, String.class, String.class, String.class).getReturnType());
         HttpClient.class.getMethod("reportPrefixes", JsonObject.class);
+        HttpClient.class.getMethod("reportPrefixCatalog", JsonObject.class);
         HttpClient.class.getMethod("fetchPrefixOperations", int.class);
     }
 
