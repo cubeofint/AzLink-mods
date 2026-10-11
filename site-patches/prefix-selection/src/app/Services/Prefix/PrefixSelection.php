@@ -12,6 +12,10 @@ use RuntimeException;
 
 /**
  * Cabinet / admin view-model and the rules for creating a prefix_select op.
+ *
+ * Only quest-category groups are selectable. Donate / staff / media stay in game
+ * and are not part of the cabinet list. LuckPerms catalog is per-server; leftover
+ * server_id NULL rows are ignored once that server has an export.
  */
 class PrefixSelection
 {
@@ -51,7 +55,8 @@ class PrefixSelection
             ->orderBy('name')
             ->get();
 
-        $catalog = PrefixCatalog::query()->get()->keyBy('group');
+        $catalogRows = PrefixCatalog::query()->whereIn('server_id', $ids)->get();
+
         $pending = PrefixOperation::query()
             ->where('user_id', $user->id)
             ->where('status', PrefixOperation::PENDING)
@@ -64,8 +69,9 @@ class PrefixSelection
             ->unique('server_id')
             ->keyBy('server_id');
 
-        return $servers->map(function (Server $server) use ($rows, $catalog, $pending, $latest) {
+        return $servers->map(function (Server $server) use ($rows, $catalogRows, $pending, $latest) {
             $row = $rows->get($server->id);
+            $catalog = PrefixCatalog::mapForServer($server->id, $catalogRows);
 
             return [
                 'server' => $server,
@@ -81,6 +87,8 @@ class PrefixSelection
     }
 
     /**
+     * Quest groups only. Server catalog when present; otherwise prefix_raw from the player report.
+     *
      * @param  Collection<string, PrefixCatalog>  $catalog
      * @return Collection<int, array<string, mixed>>
      */
@@ -95,21 +103,27 @@ class PrefixSelection
             }
 
             $entry = $catalog->get($group);
+            $category = $entry?->category ?: (string) ($item['category'] ?? 'other');
+            if (! PrefixCatalog::isQuestCategory($category)) {
+                continue;
+            }
+
             if ($entry !== null && ! $entry->enabled) {
                 continue;
             }
 
-            $raw = $entry?->prefix_raw ?: (string) ($item['prefix_raw'] ?? '');
-            $category = $entry?->category ?: (string) ($item['category'] ?? 'other');
+            $raw = $entry !== null
+                ? (string) ($entry->visiblePrefixRaw() ?: ($item['prefix_raw'] ?? ''))
+                : (string) ($item['prefix_raw'] ?? '');
 
             $options->push([
                 'group' => $group,
-                'display_name' => $entry?->display_name ?: $group,
+                'display_name' => $entry !== null ? $entry->visibleDisplayName() : $group,
                 'prefix_raw' => $raw,
                 'preview' => $this->formatter->toHtml($raw),
                 'category' => $category,
                 'category_label' => PrefixCatalog::categoryLabel($category),
-                'sort' => $entry?->sort ?? 1000,
+                'sort' => $entry !== null ? $entry->visibleSort() : 1000,
                 'in_catalog' => $entry !== null,
             ]);
         }
@@ -131,17 +145,19 @@ class PrefixSelection
             throw new RuntimeException('prefix_not_synced');
         }
 
-        if ($source !== 'admin_reset' && $row->locked_staff) {
-            throw new RuntimeException('prefix_staff_locked');
-        }
-
         if ($group !== null && $group !== '') {
-            $available = collect($row->available ?? [])->pluck('group')->filter()->all();
-            if (! in_array($group, $available, true)) {
+            $available = collect($row->available ?? []);
+            $reported = $available->firstWhere('group', $group);
+            if ($reported === null) {
                 throw new RuntimeException('prefix_not_available');
             }
 
-            $catalog = PrefixCatalog::query()->where('group', $group)->first();
+            $catalog = PrefixCatalog::resolveForServer($serverId, $group);
+            $category = $catalog?->category ?: (string) ($reported['category'] ?? 'other');
+            if (! PrefixCatalog::isQuestCategory($category)) {
+                throw new RuntimeException('prefix_not_available');
+            }
+
             if ($catalog !== null && ! $catalog->enabled) {
                 throw new RuntimeException('prefix_disabled');
             }

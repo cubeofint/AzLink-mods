@@ -3,6 +3,7 @@
 namespace Azuriom\Http\Controllers\Api;
 
 use Azuriom\Http\Controllers\Controller;
+use Azuriom\Services\Prefix\PrefixCatalogImporter;
 use Azuriom\Services\Prefix\PrefixOperationQueue;
 use Azuriom\Services\Prefix\PrefixReporter;
 use Azuriom\Services\Prefix\PrefixSelection;
@@ -12,6 +13,7 @@ use Illuminate\Http\Request;
  * AzLink prefix sync. Disabled unless setting prefixes.enabled = 1.
  *
  * POST /api/azlink/prefixes/report
+ * POST /api/azlink/prefixes/catalog
  * GET  /api/azlink/prefixes/operations
  * POST /api/azlink/prefixes/ack
  */
@@ -36,6 +38,26 @@ class PrefixController extends Controller
         $result = $reporter->report((int) $request->input('server-id'), $data['players']);
 
         return response()->json($result);
+    }
+
+    public function catalog(Request $request, PrefixCatalogImporter $importer)
+    {
+        abort_unless(PrefixSelection::enabled(), 404);
+
+        $data = $this->validate($request, [
+            'schema' => ['required'],
+            'hash' => ['required', 'string', 'max:64'],
+            'full' => ['required', 'boolean'],
+            'groups' => ['present', 'array', 'max:'.PrefixCatalogImporter::MAX_GROUPS],
+            'groups.*.group' => ['required', 'string', 'max:64'],
+            'groups.*.prefix_raw' => ['nullable', 'string', 'max:255'],
+            'groups.*.priority' => ['nullable', 'integer'],
+            'groups.*.track_index' => ['nullable', 'integer'],
+            'groups.*.display_name' => ['nullable', 'string', 'max:120'],
+            'groups.*.category' => ['nullable', 'string', 'max:16'],
+        ]);
+
+        return response()->json($importer->import((int) $request->input('server-id'), $data));
     }
 
     public function operations(Request $request, PrefixOperationQueue $queue)

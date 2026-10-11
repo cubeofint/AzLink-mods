@@ -57,10 +57,12 @@ class PrefixSelectionTest extends TestCase
             'uuid' => 'f3fc162d-d344-32fa-8c9a-0b987b0791cf',
             'name' => 'Nick',
             'available' => [
+                ['group' => 'miner', 'prefix_raw' => '&a[Шахтёр]', 'category' => 'quest'],
                 ['group' => 'vip', 'prefix_raw' => '<gold>[VIP]</gold>', 'category' => 'donate'],
                 ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'other'],
+                ['group' => 'media', 'prefix_raw' => '&b[YT]', 'category' => 'media'],
             ],
-            'selected' => 'vip',
+            'selected' => 'miner',
             'locked_staff' => false,
         ]]);
 
@@ -68,8 +70,9 @@ class PrefixSelectionTest extends TestCase
         $this->assertSame(0, $first['skipped']);
 
         $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
-        $this->assertSame('vip', $row->selected);
-        $this->assertCount(2, $row->available);
+        $this->assertSame('miner', $row->selected);
+        $this->assertCount(4, $row->available);
+        $this->assertSame('media', $row->available[3]['category']);
 
         $byName = User::factory()->create(['name' => 'OnlyName', 'game_id' => null]);
         $second = $reporter->report($this->server->id, [[
@@ -101,46 +104,85 @@ class PrefixSelectionTest extends TestCase
     {
         $this->seedSnapshot();
 
-        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
+        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'miner', 'profile');
 
         $this->assertSame(Op::TYPE_SELECT, $op->type);
-        $this->assertSame('vip', $op->group);
+        $this->assertSame('miner', $op->group);
         $this->assertSame(Op::PENDING, $op->status);
-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
     }
 
-    public function test_staff_locked_blocks_profile_select(): void
+    public function test_staff_can_select_quest_prefix(): void
     {
         $this->seedSnapshot(locked: true);
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('prefix_staff_locked');
-        app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
+        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'miner', 'profile');
+        $this->assertSame('miner', $op->group);
     }
 
-    public function test_disabled_catalog_entry_hidden_and_not_selectable(): void
+    public function test_cabinet_shows_only_quest_and_keeps_uncatalogued_quest(): void
     {
         $this->seedSnapshot();
         PrefixCatalog::query()->create([
-            'group' => 'hidden',
-            'display_name' => 'Hidden',
-            'prefix_raw' => '&8[X]',
-            'category' => 'other',
-            'sort' => 1,
-            'enabled' => false,
-        ]);
-        PrefixCatalog::query()->create([
-            'group' => 'vip',
-            'display_name' => 'VIP',
-            'prefix_raw' => '<gold>[VIP]</gold>',
-            'category' => 'donate',
+            'server_id' => $this->server->id,
+            'group' => 'miner',
+            'display_name' => 'Шахтёр',
+            'prefix_raw' => '&a[Шахтёр]',
+            'category' => 'quest',
             'sort' => 0,
             'enabled' => true,
         ]);
 
         $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
-        $options = app(PrefixSelection::class)->visibleOptions($row, PrefixCatalog::query()->get()->keyBy('group'));
-        $this->assertTrue($options->contains('group', 'vip'));
+        $row->available = array_merge($row->available, [
+            ['group' => 'builder', 'prefix_raw' => '&b[Строитель]', 'category' => 'quest'],
+        ]);
+        $row->save();
+
+        $options = app(PrefixSelection::class)->visibleOptions(
+            $row,
+            PrefixCatalog::mapForServer($this->server->id)
+        );
+
+        $this->assertTrue($options->contains('group', 'miner'));
+        $this->assertTrue($options->contains('group', 'builder'));
+        $this->assertFalse($options->contains('group', 'vip'));
+        $this->assertFalse($options->contains('group', 'hidden'));
+        $this->assertFalse($options->contains('group', 'media'));
+        $this->assertSame('&b[Строитель]', $options->firstWhere('group', 'builder')['prefix_raw']);
+        $this->assertFalse($options->firstWhere('group', 'builder')['in_catalog']);
+    }
+
+    public function test_disabled_quest_catalog_entry_hidden_and_not_selectable(): void
+    {
+        $this->seedSnapshot();
+        PrefixCatalog::query()->create([
+            'server_id' => $this->server->id,
+            'group' => 'hidden',
+            'display_name' => 'Hidden',
+            'prefix_raw' => '&8[X]',
+            'category' => 'quest',
+            'sort' => 1,
+            'enabled' => false,
+        ]);
+        PrefixCatalog::query()->create([
+            'server_id' => $this->server->id,
+            'group' => 'miner',
+            'display_name' => 'Шахтёр',
+            'prefix_raw' => '&a[Шахтёр]',
+            'category' => 'quest',
+            'sort' => 0,
+            'enabled' => true,
+        ]);
+
+        $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
+        $row->available = array_merge($row->available, [
+            ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'quest'],
+        ]);
+        $row->save();
+
+        $options = app(PrefixSelection::class)->visibleOptions($row, PrefixCatalog::mapForServer($this->server->id));
+        $this->assertTrue($options->contains('group', 'miner'));
         $this->assertFalse($options->contains('group', 'hidden'));
 
         $this->expectException(RuntimeException::class);
@@ -148,28 +190,48 @@ class PrefixSelectionTest extends TestCase
         app(PrefixSelection::class)->select($this->user, $this->server->id, 'hidden', 'profile');
     }
 
+    public function test_reporter_stores_category_as_given(): void
+    {
+        $available = app(PrefixReporter::class)->normalizeAvailable([
+            ['group' => 'yt', 'prefix_raw' => '&b[YT]', 'category' => 'media'],
+            ['group' => 'custom', 'prefix_raw' => '&f[X]', 'category' => 'event'],
+        ]);
+
+        $this->assertSame('media', $available[0]['category']);
+        $this->assertSame('event', $available[1]['category']);
+    }
+
+    public function test_donate_prefix_is_not_selectable(): void
+    {
+        $this->seedSnapshot();
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('prefix_not_available');
+        app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
+    }
+
     public function test_pending_lease_and_idempotent_ack(): void
     {
         $this->seedSnapshot();
         $queue = app(PrefixOperationQueue::class);
-        $op = $queue->enqueue($this->user, $this->server->id, 'vip', ['source' => 'profile']);
+        $op = $queue->enqueue($this->user, $this->server->id, 'miner', ['source' => 'profile']);
 
         $first = $queue->pending($this->server->id, 50);
         $this->assertCount(1, $first);
         $this->assertSame($op->id, $first[0]['op_id']);
         $this->assertSame('prefix_select', $first[0]['type']);
-        $this->assertSame('vip', $first[0]['group']);
+        $this->assertSame('miner', $first[0]['group']);
 
         $leased = $queue->pending($this->server->id, 50);
         $this->assertCount(0, $leased);
 
-        $ack = $queue->ack($this->server->id, $op->id, Op::APPLIED, null, 'vip');
+        $ack = $queue->ack($this->server->id, $op->id, Op::APPLIED, null, 'miner');
         $this->assertSame(Op::APPLIED, $ack->status);
-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
 
         $again = $queue->ack($this->server->id, $op->id, Op::REJECTED, 'ignored', null);
         $this->assertSame(Op::APPLIED, $again->status);
-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
     }
 
     public function test_ack_rejected_keeps_previous_selection(): void
@@ -177,9 +239,9 @@ class PrefixSelectionTest extends TestCase
         $this->seedSnapshot();
         $queue = app(PrefixOperationQueue::class);
         $op = $queue->enqueue($this->user, $this->server->id, null, ['source' => 'admin_reset']);
-        $queue->ack($this->server->id, $op->id, Op::REJECTED, 'staff_locked', 'vip');
+        $queue->ack($this->server->id, $op->id, Op::REJECTED, 'staff_locked', 'miner');
 
-        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
+        $this->assertSame('miner', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
         $this->assertSame(Op::REJECTED, $op->fresh()->status);
     }
 
@@ -215,10 +277,11 @@ class PrefixSelectionTest extends TestCase
             'user_id' => $this->user->id,
             'server_id' => $this->server->id,
             'available' => [
+                ['group' => 'miner', 'prefix_raw' => '&a[Шахтёр]', 'category' => 'quest'],
                 ['group' => 'vip', 'prefix_raw' => '<gold>[VIP]</gold>', 'category' => 'donate'],
                 ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'other'],
             ],
-            'selected' => 'vip',
+            'selected' => 'miner',
             'locked_staff' => $locked,
             'synced_at' => now(),
         ]);

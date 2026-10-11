@@ -12,7 +12,7 @@ import java.util.concurrent.CompletableFuture;
  * without a compile dependency on AzLink internals. All methods return JSON strings.
  *
  * <p>cointcore prefix sync reflects {@code postJson}/{@code getJson} and optional
- * {@code reportPrefixes}/{@code fetchPrefixOperations}/{@code ackPrefix} on this class
+ * {@code reportPrefixes}/{@code reportPrefixCatalog}/{@code fetchPrefixOperations}/{@code ackPrefix} on this class
  * (same names as {@code PrefixBridge}). Paths are {@code /azlink/...}; HttpClient prepends
  * {@code /api}. Ack status for prefixes is {@code applied}|{@code rejected}.
  */
@@ -113,6 +113,16 @@ public final class CoinOperationsBridge {
         }
         JsonObject body = AzLinkPlugin.getGson().fromJson(json, JsonObject.class);
         return current.getHttpClient().reportPrefixes(body).thenApply(Object::toString);
+    }
+
+    /** Game → site prefix catalog. Same contract as {@code PrefixBridge.reportPrefixCatalog}. */
+    public static CompletableFuture<String> reportPrefixCatalog(String json) {
+        AzLinkPlugin current = plugin;
+        if (!isAvailable()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("AzLink not configured"));
+        }
+        JsonObject body = AzLinkPlugin.getGson().fromJson(json, JsonObject.class);
+        return current.getHttpClient().reportPrefixCatalog(body).thenApply(Object::toString);
     }
 
     /** Site → game pending {@code prefix_select} ops for this server. */
