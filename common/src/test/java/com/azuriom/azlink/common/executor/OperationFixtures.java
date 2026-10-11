@@ -34,6 +34,42 @@ final class OperationFixtures {
                 hash, basePrivilegePayload(entitlementVersion, false));
     }
 
+    static ShopOperation groupGrant(String operationId, String claimToken, String hash,
+                                    long version, String group, String expiresAt) {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("schema_version", 1);
+        payload.addProperty("type", OperationType.GROUP_GRANT.toWire());
+        payload.addProperty("uuid", PLAYER.toString());
+        payload.addProperty("group", group);
+        payload.addProperty("entitlement_key", group);
+        payload.addProperty("version", version);
+        if (expiresAt != null) {
+            payload.addProperty("expires_at", expiresAt);
+        }
+        return new ShopOperation(operationId, claimToken, OperationType.GROUP_GRANT.toWire(), hash, payload);
+    }
+
+    static ShopOperation groupRevoke(String operationId, String claimToken, String hash, long version, String group) {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("schema_version", 1);
+        payload.addProperty("type", OperationType.GROUP_REVOKE.toWire());
+        payload.addProperty("uuid", PLAYER.toString());
+        payload.addProperty("group", group);
+        payload.addProperty("entitlement_key", group);
+        payload.addProperty("version", version);
+        return new ShopOperation(operationId, claimToken, OperationType.GROUP_REVOKE.toWire(), hash, payload);
+    }
+
+    static ShopOperation kitCredit(String operationId, String claimToken, String hash, String kit, int qty) {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("schema_version", 1);
+        payload.addProperty("type", OperationType.KIT_CREDIT.toWire());
+        payload.addProperty("uuid", PLAYER.toString());
+        payload.addProperty("kit", kit);
+        payload.addProperty("qty", qty);
+        return new ShopOperation(operationId, claimToken, OperationType.KIT_CREDIT.toWire(), hash, payload);
+    }
+
     static ShopOperation kitRedeem(String operationId, String claimToken, String hash, long redemptionId) {
         JsonObject payload = new JsonObject();
         payload.addProperty("schema_version", 1);

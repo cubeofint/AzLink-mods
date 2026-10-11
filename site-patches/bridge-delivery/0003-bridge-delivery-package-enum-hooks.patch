@@ -1,0 +1,169 @@
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Sun, 11 Oct 2026 20:20:00 +0500
+Subject: [PATCH 3/3] Bridge delivery: package mode=bridge, enum, refund hooks
+
+Package::dispatchCommands sends bridge groups through MinecraftOperationDispatcher.
+Adds group_grant/group_revoke/kit_credit enum cases, admin routes, successor
+PendingActivation, package form include, check command registration.
+
+---
+ plugins/shop/src/Enums/MinecraftOperationType.php |  3 +
+ plugins/shop/src/Models/Package.php | 18 +++++++-
+ plugins/shop/src/Providers/ShopServiceProvider.php | 40 ++++++++++++++++-
+ plugins/shop/routes/admin.php |  3 +
+ plugins/shop/src/Services/EntitlementLifecycleService.php | 10 +++-
+ plugins/shop/resources/views/admin/packages/_form.blade.php |  1 +
+ 6 files changed, 70 insertions(+), 5 deletions(-)
+
+diff --git a/plugins/shop/src/Enums/MinecraftOperationType.php b/plugins/shop/src/Enums/MinecraftOperationType.php
+--- a/plugins/shop/src/Enums/MinecraftOperationType.php
++++ b/plugins/shop/src/Enums/MinecraftOperationType.php
+@@ -8,5 +8,8 @@ enum MinecraftOperationType: string
+ {
+     case PrivilegeReconcile = 'privilege_reconcile';
+     case PrivilegeRevoke = 'privilege_revoke';
+     case KitRedeem = 'kit_redeem';
++    case GroupGrant = 'group_grant';
++    case GroupRevoke = 'group_revoke';
++    case KitCredit = 'kit_credit';
+ }
+diff --git a/plugins/shop/src/Models/Package.php b/plugins/shop/src/Models/Package.php
+--- a/plugins/shop/src/Models/Package.php
++++ b/plugins/shop/src/Models/Package.php
+@@ -1,6 +1,7 @@
+ <?php
+ 
+ namespace Azuriom\Plugin\Shop\Models;
+ 
++use Azuriom\Plugin\Shop\Services\BridgePackageDelivery;
+ use Illuminate\Support\Arr;
+ 
+@@
+     public function dispatchCommands(string $trigger, PaymentItem $item): void
+     {
+         $user = $item->payment->user;
+ 
+         $serverCommands = collect($this->commands)
+             ->merge(($json = setting('shop.commands')) ? json_decode($json, true) : [])
+             ->filter(fn (mixed $command) => is_array($command))
+             ->filter(fn (array $command) => $command['trigger'] === $trigger)
+             ->map(function (array $command) use ($item) {
+                 $server = $command['server'];
+ 
+                 if (! is_numeric($server)) {
+                     $command['server'] = Arr::get($item->variables ?? [], $server);
+                 }
+ 
+                 return $command;
+             })
+             ->filter(fn (array $command) => $command['server'] !== null);
+ 
++        $bridge = $serverCommands->filter(fn (array $command) => ($command['mode'] ?? '') === 'bridge');
++        $classic = $serverCommands->reject(fn (array $command) => ($command['mode'] ?? '') === 'bridge');
++
++        if ($bridge->isNotEmpty()) {
++            app(BridgePackageDelivery::class)->dispatch($this, $item, $trigger, $bridge);
++        }
++
+-        $servers = Server::findMany($serverCommands->pluck('server')->unique());
++        $servers = Server::findMany($classic->pluck('server')->unique());
+ 
+         foreach ($servers as $server) {
+-            $commands = $serverCommands->where('server', $server->id);
++            $commands = $classic->where('server', $server->id);
+ 
+             $onlineCommands = $this->mapCommands($commands, true, $item);
+             $offlineCommands = $this->mapCommands($commands, false, $item);
+diff --git a/plugins/shop/src/Providers/ShopServiceProvider.php b/plugins/shop/src/Providers/ShopServiceProvider.php
+--- a/plugins/shop/src/Providers/ShopServiceProvider.php
++++ b/plugins/shop/src/Providers/ShopServiceProvider.php
+@@ -91,8 +91,10 @@ class ShopServiceProvider extends BasePluginServiceProvider
+         $this->commands([
+             PaymentExpireCommand::class,
+             SubscriptionRenewCommand::class,
+             \Azuriom\Plugin\Shop\Commands\ConfiguredDeliveryCommand::class,
++            \Azuriom\Plugin\Shop\Commands\BridgeDeliveryCheckCommand::class,
+         ]);
+ 
+         \Illuminate\Support\Facades\Event::listen(
+             \Azuriom\Plugin\Shop\Events\MinecraftOperationSucceeded::class,
+@@ -108,6 +110,36 @@ class ShopServiceProvider extends BasePluginServiceProvider
+             }
+         );
+ 
++        \Illuminate\Support\Facades\Event::listen(
++            'eloquent.updated: '.\Azuriom\Plugin\Shop\Models\Payment::class,
++            function (\Azuriom\Plugin\Shop\Models\Payment $payment): void {
++                if (! in_array($payment->status, ['refunded', 'chargeback'], true)) {
++                    return;
++                }
++                if (! \Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService::enabled()) {
++                    return;
++                }
++                $table = (new \Azuriom\Plugin\Shop\Models\ConfiguredPrivilegePurchase())->getTable();
++                if (! \Illuminate\Support\Facades\Schema::hasColumn($table, 'payment_id')) {
++                    return;
++                }
++                \Azuriom\Plugin\Shop\Models\ConfiguredPrivilegePurchase::query()
++                    ->where('payment_id', $payment->id)
++                    ->get()
++                    ->each(function (\Azuriom\Plugin\Shop\Models\ConfiguredPrivilegePurchase $purchase): void {
++                        $purchase->update([
++                            'status' => \Azuriom\Plugin\Shop\Enums\ConfiguredPurchaseStatus::Refunded,
++                        ]);
++                        try {
++                            app(\Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService::class)->revokePurchase($purchase);
++                        } catch (\Throwable $e) {
++                            \Illuminate\Support\Facades\Log::warning('[shop] refund revoke failed: '.$e->getMessage());
++                        }
++                    });
++            }
++        );
++
+         View::composer('admin.dashboard', ShopAdminDashboardComposer::class);
+         View::composer('*', ShopViewComposer::class);
+@@
+-                                'name' => 'Выдача в игре',
++                                'name' => 'Доставки',
+                                 'permission' => 'shop.payments',
+                                 'active' => 'shop.admin.deliveries.*',
+                             ],
+diff --git a/plugins/shop/routes/admin.php b/plugins/shop/routes/admin.php
+--- a/plugins/shop/routes/admin.php
++++ b/plugins/shop/routes/admin.php
+@@ -104,5 +104,7 @@ Route::resource('discounts', DiscountController::class)->middleware('can:shop.giftcards')->except('show');
+ 
+ Route::middleware('can:shop.payments')->group(function () {
+     Route::get('/deliveries', [\Azuriom\Plugin\Shop\Controllers\Admin\DeliveryController::class, 'index'])->name('deliveries.index');
++    Route::post('/deliveries/{operation}/retry', [\Azuriom\Plugin\Shop\Controllers\Admin\DeliveryController::class, 'retry'])->name('deliveries.retry');
++    Route::post('/deliveries/{operation}/mark', [\Azuriom\Plugin\Shop\Controllers\Admin\DeliveryController::class, 'markDelivered'])->name('deliveries.mark');
+ });
+diff --git a/plugins/shop/src/Services/EntitlementLifecycleService.php b/plugins/shop/src/Services/EntitlementLifecycleService.php
+--- a/plugins/shop/src/Services/EntitlementLifecycleService.php
++++ b/plugins/shop/src/Services/EntitlementLifecycleService.php
+@@ -124,10 +124,16 @@ class EntitlementLifecycleService
+             if ($successor !== null) {
+                 $this->assertAdjacent($current, $successor);
+-                if ($successor->status !== ConfiguredPurchaseStatus::Scheduled) {
+-                    throw new LogicException('Expiration successor is not scheduled.');
++                if (! in_array($successor->status, [
++                    ConfiguredPurchaseStatus::Scheduled,
++                    ConfiguredPurchaseStatus::PendingActivation,
++                ], true)) {
++                    throw new LogicException('Expiration successor is not scheduled or pending activation.');
++                }
++                if ($successor->status === ConfiguredPurchaseStatus::Scheduled) {
++                    $successor->update(['status' => ConfiguredPurchaseStatus::PendingActivation]);
+                 }
+-                $successor->update(['status' => ConfiguredPurchaseStatus::PendingActivation]);
+                 $state = $this->purchaseState($successor, [
+                     'status' => UserPrivilegeEntitlementStatus::PendingActivation,
+                     'version' => $entitlement->version + 1,
+diff --git a/plugins/shop/resources/views/admin/packages/_form.blade.php b/plugins/shop/resources/views/admin/packages/_form.blade.php
+--- a/plugins/shop/resources/views/admin/packages/_form.blade.php
++++ b/plugins/shop/resources/views/admin/packages/_form.blade.php
+@@
+  @include('shop::admin.commands._form', ['commands' => $package->commands ?? []])
+ @endif
++@include('shop::admin.packages._bridge_commands')
+ 

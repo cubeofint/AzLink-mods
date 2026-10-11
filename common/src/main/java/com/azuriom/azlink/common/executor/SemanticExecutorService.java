@@ -2,6 +2,7 @@ package com.azuriom.azlink.common.executor;
 
 import com.azuriom.azlink.common.AzLinkPlugin;
 import com.azuriom.azlink.common.executor.client.HttpOperationsClient;
+import com.azuriom.azlink.common.executor.handlers.OperationHandler;
 import com.azuriom.azlink.common.privileges.PrivilegeBackend;
 import com.azuriom.azlink.common.executor.client.OperationsApiClient;
 import com.azuriom.azlink.common.executor.ledger.EntitlementVersionLedger;
@@ -38,15 +39,23 @@ public class SemanticExecutorService {
         this.plugin = plugin;
     }
 
+    private OperationHandler kitRedeemHandler;
+    private OperationHandler kitCreditHandler;
+
     /**
      * Install LuckPerms before {@link #start()}. Empty capability lists then accept every site capability.
      */
-    private com.azuriom.azlink.common.executor.handlers.OperationHandler kitRedeemHandler;
-
-    public void useKitRedeemHandler(com.azuriom.azlink.common.executor.handlers.OperationHandler handler) {
+    public void useKitRedeemHandler(OperationHandler handler) {
         this.kitRedeemHandler = handler;
         if (this.executor != null) {
             this.executor.useKitRedeemHandler(handler);
+        }
+    }
+
+    public void useKitCreditHandler(OperationHandler handler) {
+        this.kitCreditHandler = handler;
+        if (this.executor != null) {
+            this.executor.useKitCreditHandler(handler);
         }
     }
 
@@ -70,6 +79,7 @@ public class SemanticExecutorService {
             this.executor = new SemanticExecutor(this.config, operationLedger, entitlementLedger,
                     this.plugin.getLogger(), this.privilegeBackend);
             this.executor.useKitRedeemHandler(this.kitRedeemHandler);
+            this.executor.useKitCreditHandler(this.kitCreditHandler);
             OperationsApiClient client = new HttpOperationsClient(this.plugin, this.config);
             this.pollTask = new SemanticPollTask(this.plugin, this.executor, client);
 

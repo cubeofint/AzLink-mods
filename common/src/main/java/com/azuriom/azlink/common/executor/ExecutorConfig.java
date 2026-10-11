@@ -56,7 +56,10 @@ public class ExecutorConfig {
         return new ArrayList<String>(Arrays.asList(
                 "privilege_reconcile",
                 "privilege_revoke",
-                "kit_redeem"
+                "kit_redeem",
+                "group_grant",
+                "group_revoke",
+                "kit_credit"
         ));
     }
 

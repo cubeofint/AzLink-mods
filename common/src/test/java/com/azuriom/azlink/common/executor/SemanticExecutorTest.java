@@ -194,6 +194,62 @@ class SemanticExecutorTest {
     }
 
     @Test
+    void groupGrantReplacesThenDropsOlderVersion() {
+        ShopOperation first = OperationFixtures.groupGrant(
+                "19191919-aaaa-aaaa-aaaa-aaaaaaaaaaa1",
+                "20202020-aaaa-aaaa-aaaa-aaaaaaaaaaa1",
+                OperationFixtures.HASH_A, 2, "vip", "2027-01-01T00:00:00Z");
+        assertEquals(OperationResultCode.SUCCEEDED, this.executor.process(first).getResult().getResultCode());
+        assertEquals(2L, this.entitlementLedger.getGrantVersion(OperationFixtures.PLAYER, "vip").get().longValue());
+
+        ShopOperation renew = OperationFixtures.groupGrant(
+                "19191919-aaaa-aaaa-aaaa-aaaaaaaaaaa2",
+                "20202020-aaaa-aaaa-aaaa-aaaaaaaaaaa2",
+                OperationFixtures.HASH_B, 4, "vip", "2027-07-01T00:00:00Z");
+        assertEquals(OperationResultCode.SUCCEEDED, this.executor.process(renew).getResult().getResultCode());
+        assertEquals(4L, this.entitlementLedger.getGrantVersion(OperationFixtures.PLAYER, "vip").get().longValue());
+
+        ShopOperation late = OperationFixtures.groupGrant(
+                "19191919-aaaa-aaaa-aaaa-aaaaaaaaaaa3",
+                "20202020-aaaa-aaaa-aaaa-aaaaaaaaaaa3",
+                OperationFixtures.HASH_A, 3, "vip", "2027-03-01T00:00:00Z");
+        SemanticExecutor.ProcessedOperation stale = this.executor.process(late);
+        assertEquals(OperationResultCode.STALE, stale.getResult().getResultCode());
+        assertEquals("stale", stale.getAckRequest().getStatus());
+        assertEquals(4L, this.entitlementLedger.getGrantVersion(OperationFixtures.PLAYER, "vip").get().longValue());
+        assertEquals(2, this.executor.getMockApplyCount());
+    }
+
+    @Test
+    void kitCreditAcksAfterSuccessfulWriteAndReplays() {
+        ShopOperation op = OperationFixtures.kitCredit(
+                "19191919-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
+                "20202020-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
+                OperationFixtures.HASH_A, "starter", 3);
+        SemanticExecutor.ProcessedOperation first = this.executor.process(op);
+        assertEquals(OperationResultCode.SUCCEEDED, first.getResult().getResultCode());
+        assertEquals("succeeded", first.getAckRequest().getStatus());
+
+        ShopOperation replay = OperationFixtures.kitCredit(
+                "19191919-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
+                "20202020-bbbb-bbbb-bbbb-bbbbbbbbbbb2",
+                OperationFixtures.HASH_A, "starter", 3);
+        SemanticExecutor.ProcessedOperation second = this.executor.process(replay);
+        assertEquals(OperationResultCode.ALREADY_APPLIED, second.getResult().getResultCode());
+        assertEquals(1, this.executor.getMockApplyCount());
+    }
+
+    @Test
+    void kitCreditRejectsMissingQty() {
+        ShopOperation op = OperationFixtures.kitCredit(
+                "19191919-cccc-cccc-cccc-ccccccccccc1",
+                "20202020-cccc-cccc-cccc-ccccccccccc1",
+                OperationFixtures.HASH_A, "starter", 0);
+        assertEquals(OperationResultCode.FAILED, this.executor.process(op).getResult().getResultCode());
+        assertEquals(0, this.executor.getMockApplyCount());
+    }
+
+    @Test
     void retryableAndUncertainAckBuilders() {
         ShopOperation op = OperationFixtures.kitRedeem(
                 "16161616-1616-1616-1616-161616161616",

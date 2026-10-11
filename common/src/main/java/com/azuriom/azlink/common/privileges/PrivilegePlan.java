@@ -15,7 +15,8 @@ import java.util.Map;
 /**
  * Desired LuckPerms state for one shop entitlement.
  * The entitlement key becomes a group. Each true capability becomes a permission node.
- * Nodes are tagged with {@link #ENTITLEMENT_CONTEXT} so revoke only removes this purchase.
+ * {@link #ENTITLEMENT_CONTEXT} is only used to clean nodes written by older AzLink builds;
+ * new nodes are unscoped and tracked in {@code EntitlementVersionLedger}.
  */
 public final class PrivilegePlan {
 
@@ -75,10 +76,23 @@ public final class PrivilegePlan {
     public static PrivilegePlan revoke(ShopOperation operation) {
         String entitlementId = operation.getEntitlementId();
         if (entitlementId == null || entitlementId.trim().isEmpty()) {
+            entitlementId = operation.getEntitlementKey();
+        }
+        if (entitlementId == null || entitlementId.trim().isEmpty()) {
             return invalid("missing entitlement.id");
         }
         return new PrivilegePlan(entitlementId.trim(), groupName(operation.getSemanticKey()),
                 null, false, Collections.<String>emptyList(), true, null);
+    }
+
+    public static PrivilegePlan groupGrant(String entitlementKey, String groupName, Instant expiresAt) {
+        return new PrivilegePlan(entitlementKey, groupName, expiresAt, false,
+                Collections.<String>emptyList(), false, null);
+    }
+
+    public static PrivilegePlan clear(String entitlementKey, String groupName) {
+        return new PrivilegePlan(entitlementKey, groupName, null, false,
+                Collections.<String>emptyList(), true, null);
     }
 
     public String getEntitlementId() {

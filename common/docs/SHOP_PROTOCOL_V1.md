@@ -18,7 +18,12 @@ Classic AzLink (`/api/azlink`) remains a separate channel; do not merge.
   `cointcore.bonus_claim_chunks`). Regex: `^[a-z][a-z0-9._-]{0,63}$`.
   Do **not** send `*`, `meta:...`, or LuckPerms permission nodes.
 - Response: top-level `protocol_version`, `operations[]` with field `type` (not `operation_type`)
-- Operation types: `privilege_reconcile`, `privilege_revoke`, `kit_redeem`
+- Operation types: `privilege_reconcile`, `privilege_revoke`, `kit_redeem`,
+  `group_grant`, `group_revoke`, `kit_credit`
+- `group_grant` payload: `uuid`, `group`, `expires_at` (absolute ISO-8601 or null),
+  `entitlement_key`, `version`. Older versions of the same entitlement are dropped.
+- `kit_credit` payload: `uuid`, `kit`, `qty`. Credits never expire (no `valid_until`).
+  Requires cointcore `KitCreditService.addCredits(UUID, String, int)`.
 
 ## ACK
 

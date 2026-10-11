@@ -8,6 +8,8 @@ import com.azuriom.azlink.common.executor.model.ShopOperation;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
@@ -81,8 +83,14 @@ public class OperationParser {
                 return validatePrivilegeRevoke(operation);
             case KIT_REDEEM:
                 return validateKitPayload(operation);
+            case GROUP_GRANT:
+                return validateGroupGrant(operation);
+            case GROUP_REVOKE:
+                return validateGroupRevoke(operation);
+            case KIT_CREDIT:
+                return validateKitCredit(operation);
             default:
-                return ExecutionResult.of(OperationResultCode.FAILED, "unhandled type");
+                return ExecutionResult.of(OperationResultCode.FAILED, "unhandled type " + type);
         }
     }
 
@@ -115,6 +123,48 @@ public class OperationParser {
     private ExecutionResult validateKitPayload(ShopOperation operation) {
         if (isBlank(operation.getRedemptionId())) {
             return ExecutionResult.of(OperationResultCode.FAILED, "missing redemption_id");
+        }
+        return ExecutionResult.of(OperationResultCode.SUCCEEDED);
+    }
+
+    private ExecutionResult validateGroupGrant(ShopOperation operation) {
+        if (isBlank(operation.getGroup())) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "missing group");
+        }
+        if (isBlank(operation.getEntitlementKey())) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "missing entitlement_key");
+        }
+        if (operation.getEntitlementVersion() == null || operation.getEntitlementVersion() < 1) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "invalid version");
+        }
+        String expiresAt = operation.getAbsoluteExpiresAt();
+        if (expiresAt != null && !expiresAt.trim().isEmpty()) {
+            try {
+                Instant.parse(expiresAt.trim());
+            } catch (DateTimeParseException e) {
+                return ExecutionResult.of(OperationResultCode.FAILED, "invalid expires_at");
+            }
+        }
+        return ExecutionResult.of(OperationResultCode.SUCCEEDED);
+    }
+
+    private ExecutionResult validateGroupRevoke(ShopOperation operation) {
+        if (isBlank(operation.getEntitlementKey())) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "missing entitlement_key");
+        }
+        if (operation.getEntitlementVersion() == null || operation.getEntitlementVersion() < 1) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "invalid version");
+        }
+        return ExecutionResult.of(OperationResultCode.SUCCEEDED);
+    }
+
+    private ExecutionResult validateKitCredit(ShopOperation operation) {
+        if (isBlank(operation.getKit())) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "missing kit");
+        }
+        Integer qty = operation.getQty();
+        if (qty == null || qty.intValue() < 1) {
+            return ExecutionResult.of(OperationResultCode.FAILED, "invalid qty");
         }
         return ExecutionResult.of(OperationResultCode.SUCCEEDED);
     }
