@@ -80,14 +80,14 @@ Per-server LuckPerms track export. Auth is the server token (`server_id`). Max 2
 }
 ```
 
-- Upsert by `(server_id, group)`. Updates only auto fields (`auto_display_name`,
+- LuckPerms is the only source of truth. The site catalog is technical and
+  has no admin CRUD / overrides.
+- Upsert by `(server_id, group)`. Writes auto fields (`auto_display_name`,
   `auto_prefix_raw`, `auto_sort` from `track_index`, `priority`, `category`,
-  `last_seen_at`). Visible `display_name` / `sort` / `enabled` follow an admin
-  override when the matching flag is set; otherwise they track auto.
+  `last_seen_at`) and copies them onto the visible columns.
 - Same `hash` for this server is a no-op (`unchanged: true`).
 - `full=true` with a non-empty `groups` list marks missing rows (`missing_since`,
-  `enabled=false`) without deleting them. They come back enabled unless
-  `override_enabled` (manually disabled).
+  `enabled=false`) without deleting them. They are re-enabled when they return.
 - Empty `groups` or `full=false` disables nothing.
 - If more than 50% of currently present (not already missing) groups would
   disappear, the site answers `409 { "message": "force_required" }` unless

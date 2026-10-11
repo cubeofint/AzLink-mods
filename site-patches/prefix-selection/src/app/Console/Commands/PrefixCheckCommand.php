@@ -34,7 +34,7 @@ class PrefixCheckCommand extends Command
             $ok = $ok && $exists;
         }
 
-        foreach (['server_id', 'source', 'auto_display_name', 'auto_prefix_raw', 'auto_sort', 'missing_since'] as $column) {
+        foreach (['server_id', 'auto_display_name', 'auto_prefix_raw', 'auto_sort', 'last_seen_at', 'missing_since'] as $column) {
             $exists = Schema::hasColumn('prefix_catalog', $column);
             $this->line(($exists ? '[ok]  ' : '[MISS] ').'prefix_catalog.'.$column);
             $ok = $ok && $exists;
@@ -52,7 +52,6 @@ class PrefixCheckCommand extends Command
             'profile.prefixes.select' => Route::has('profile.prefixes.select'),
             'admin.prefixes.index' => Route::has('admin.prefixes.index'),
             'admin.prefixes.operations' => Route::has('admin.prefixes.operations'),
-            'admin.prefixes.reset-auto' => Route::has('admin.prefixes.reset-auto'),
         ];
 
         foreach ($routes as $label => $present) {

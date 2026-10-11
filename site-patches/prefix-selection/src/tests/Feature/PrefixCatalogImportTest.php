@@ -6,7 +6,10 @@ use Azuriom\Models\PrefixCatalog;
 use Azuriom\Models\PrefixCatalogImport;
 use Azuriom\Models\Server;
 use Azuriom\Models\Setting;
+use Azuriom\Models\User;
+use Azuriom\Models\UserServerPrefix;
 use Azuriom\Services\Prefix\PrefixCatalogImporter;
+use Azuriom\Services\Prefix\PrefixSelection;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use RuntimeException;
 use Tests\TestCase;
@@ -38,13 +41,13 @@ class PrefixCatalogImportTest extends TestCase
         Setting::updateSettings(['prefixes.enabled' => '1']);
     }
 
-    public function test_overrides_are_preserved_on_upsert(): void
+    public function test_import_overwrites_visible_fields_from_luckperms(): void
     {
         PrefixCatalog::query()->create([
             'server_id' => $this->server->id,
             'group' => 'miner',
-            'display_name' => 'Шахтёр (ручной)',
-            'auto_display_name' => 'miner',
+            'display_name' => 'Шахтёр (старое)',
+            'auto_display_name' => 'old',
             'prefix_raw' => '&a[old]',
             'auto_prefix_raw' => '&a[old]',
             'category' => 'quest',
@@ -52,10 +55,6 @@ class PrefixCatalogImportTest extends TestCase
             'auto_sort' => 1,
             'priority' => 0,
             'enabled' => false,
-            'source' => PrefixCatalog::SOURCE_AUTO,
-            'override_display_name' => true,
-            'override_sort' => true,
-            'override_enabled' => true,
         ]);
 
         $result = $this->importer()->import($this->server->id, $this->payload('h1', [
@@ -64,19 +63,16 @@ class PrefixCatalogImportTest extends TestCase
 
         $this->assertFalse($result['unchanged']);
         $row = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first();
-        $this->assertSame('Шахтёр (ручной)', $row->display_name);
+        $this->assertSame('Miner', $row->display_name);
         $this->assertSame('Miner', $row->auto_display_name);
-        $this->assertSame(7, $row->sort);
+        $this->assertSame(10, $row->sort);
         $this->assertSame(10, $row->auto_sort);
-        $this->assertFalse($row->enabled);
-        $this->assertTrue($row->override_display_name);
-        $this->assertTrue($row->override_sort);
-        $this->assertTrue($row->override_enabled);
+        $this->assertTrue($row->enabled);
         $this->assertSame('&a[Miner]', $row->prefix_raw);
         $this->assertSame('&a[Miner]', $row->auto_prefix_raw);
         $this->assertNull($row->missing_since);
-        $this->assertSame('Шахтёр (ручной)', $row->visibleDisplayName());
-        $this->assertSame(7, $row->visibleSort());
+        $this->assertSame('Miner', $row->visibleDisplayName());
+        $this->assertSame(10, $row->visibleSort());
     }
 
     public function test_missing_groups_from_full_export_are_disabled(): void
@@ -112,7 +108,6 @@ class PrefixCatalogImportTest extends TestCase
 
         PrefixCatalog::query()->where('group', 'miner')->update([
             'display_name' => 'touched',
-            'override_display_name' => true,
         ]);
 
         $second = $this->importer()->import($this->server->id, $payload);
@@ -180,7 +175,7 @@ class PrefixCatalogImportTest extends TestCase
         $this->assertFalse(PrefixCatalog::query()->where('group', 'b')->value('enabled'));
     }
 
-    public function test_returning_group_is_reenabled_unless_manually_disabled(): void
+    public function test_returning_group_is_reenabled(): void
     {
         $this->importer()->import($this->server->id, $this->payload('all', [
             $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
@@ -189,11 +184,6 @@ class PrefixCatalogImportTest extends TestCase
         $this->importer()->import($this->server->id, $this->payload('gone', [
             $this->group('staff', '&c[S]', 2, 2, 'Staff', 'staff'),
         ], force: true));
-
-        PrefixCatalog::query()->where('group', 'staff')->update([
-            'enabled' => false,
-            'override_enabled' => true,
-        ]);
 
         $this->importer()->import($this->server->id, $this->payload('back', [
             $this->group('miner', '&a[M]', 1, 1, 'Miner', 'quest'),
@@ -204,13 +194,16 @@ class PrefixCatalogImportTest extends TestCase
         $this->assertTrue($miner->enabled);
         $this->assertNull($miner->missing_since);
         $staff = PrefixCatalog::query()->where('group', 'staff')->first();
-        $this->assertFalse($staff->enabled);
-        $this->assertTrue($staff->override_enabled);
+        $this->assertTrue($staff->enabled);
         $this->assertNull($staff->missing_since);
     }
 
-    public function test_existing_global_manual_row_is_not_rewritten(): void
+    public function test_null_catalog_is_ignored_once_server_catalog_exists(): void
     {
+        $user = User::factory()->create([
+            'name' => 'Nick',
+            'game_id' => 'f3fc162dd34432fa8c9a0b987b0791cf',
+        ]);
         PrefixCatalog::query()->create([
             'server_id' => null,
             'group' => 'miner',
@@ -218,21 +211,37 @@ class PrefixCatalogImportTest extends TestCase
             'prefix_raw' => '&7[G]',
             'category' => 'quest',
             'sort' => 0,
-            'source' => PrefixCatalog::SOURCE_MANUAL,
             'enabled' => true,
         ]);
 
         $this->importer()->import($this->server->id, $this->payload('srv', [
-            $this->group('miner', '&a[M]', 1, 4, 'Miner', 'quest'),
+            $this->group('farmer', '&e[F]', 1, 4, 'Farmer', 'quest'),
         ]));
 
-        $this->assertSame(2, PrefixCatalog::query()->where('group', 'miner')->count());
+        $this->assertSame(2, PrefixCatalog::query()->where('group', 'miner')->count() + PrefixCatalog::query()->where('group', 'farmer')->count());
         $global = PrefixCatalog::query()->whereNull('server_id')->where('group', 'miner')->first();
         $this->assertSame('Global miner', $global->display_name);
-        $this->assertSame(PrefixCatalog::SOURCE_MANUAL, $global->source);
-        $local = PrefixCatalog::query()->where('server_id', $this->server->id)->where('group', 'miner')->first();
-        $this->assertSame(PrefixCatalog::SOURCE_AUTO, $local->source);
-        $this->assertSame(4, $local->auto_sort);
+
+        UserServerPrefix::query()->create([
+            'user_id' => $user->id,
+            'server_id' => $this->server->id,
+            'available' => [
+                ['group' => 'miner', 'prefix_raw' => '&a[Шахтёр]', 'category' => 'quest'],
+                ['group' => 'farmer', 'prefix_raw' => '&e[F]', 'category' => 'quest'],
+            ],
+            'selected' => null,
+            'synced_at' => now(),
+        ]);
+
+        $row = UserServerPrefix::query()->where('user_id', $user->id)->first();
+        $options = app(PrefixSelection::class)->visibleOptions($row, PrefixCatalog::mapForServer($this->server->id));
+
+        $this->assertTrue($options->contains('group', 'miner'));
+        $this->assertTrue($options->contains('group', 'farmer'));
+        $this->assertSame('&a[Шахтёр]', $options->firstWhere('group', 'miner')['prefix_raw']);
+        $this->assertFalse($options->firstWhere('group', 'miner')['in_catalog']);
+        $this->assertTrue($options->firstWhere('group', 'farmer')['in_catalog']);
+        $this->assertSame('Farmer', $options->firstWhere('group', 'farmer')['display_name']);
     }
 
     private function importer(): PrefixCatalogImporter

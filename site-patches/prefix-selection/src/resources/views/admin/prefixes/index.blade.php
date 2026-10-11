@@ -16,6 +16,8 @@
         <div class="alert alert-info">{{ trans('prefixes.admin.catalog.flag_off') }}</div>
     @endunless
 
+    <p class="text-muted">{{ trans('prefixes.admin.catalog.readonly') }}</p>
+
     @if($imports->isNotEmpty())
         <div class="card shadow mb-4">
             <div class="card-header">
@@ -49,11 +51,8 @@
     @endif
 
     <div class="card shadow mb-4">
-        <div class="card-header d-flex align-items-center justify-content-between">
+        <div class="card-header">
             <h5 class="card-title mb-0">{{ trans('prefixes.admin.catalog.title') }}</h5>
-            <a href="{{ route('admin.prefixes.create') }}" class="btn btn-primary btn-sm">
-                <i class="bi bi-plus-lg"></i> {{ trans('prefixes.admin.catalog.create') }}
-            </a>
         </div>
         <div class="card-body">
             <form method="GET" class="row g-3 mb-4">
@@ -61,7 +60,6 @@
                     <label class="form-label" for="catalogServerInput">{{ trans('prefixes.admin.ops.server') }}</label>
                     <select class="form-select" id="catalogServerInput" name="server_id" onchange="this.form.submit()">
                         <option value="">{{ trans('messages.all') ?? '—' }}</option>
-                        <option value="global" @selected($serverId === 'global')>{{ trans('prefixes.admin.catalog.global') }}</option>
                         @foreach($servers as $server)
                             <option value="{{ $server->id }}" @selected((string) $serverId === (string) $server->id)>{{ $server->name }}</option>
                         @endforeach
@@ -79,29 +77,19 @@
                         <th>{{ trans('prefixes.admin.catalog.preview') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.category') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.sort') }}</th>
-                        <th>{{ trans('prefixes.admin.catalog.source') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.missing_since') }}</th>
                         <th>{{ trans('prefixes.admin.catalog.enabled') }}</th>
-                        <th class="text-end"></th>
                     </tr>
                     </thead>
                     <tbody>
                     @forelse($items as $item)
-                        <tr>
-                            <td>{{ $item->server?->name ?? trans('prefixes.admin.catalog.global') }}</td>
+                        <tr @class(['table-warning' => $item->missing_since !== null])>
+                            <td>{{ $item->server?->name ?? '—' }}</td>
                             <td><code>{{ $item->group }}</code></td>
-                            <td>
-                                {{ $item->visibleDisplayName() }}
-                                @if($item->override_display_name)
-                                    <span class="badge text-bg-warning">{{ trans('prefixes.admin.catalog.override') }}</span>
-                                @endif
-                            </td>
+                            <td>{{ $item->visibleDisplayName() }}</td>
                             <td>{!! $formatter->toHtml($item->visiblePrefixRaw()) !!}</td>
                             <td>{{ \Azuriom\Models\PrefixCatalog::categoryLabel($item->category) }}</td>
                             <td>{{ $item->visibleSort() }}</td>
-                            <td>
-                                {{ $item->isAuto() ? trans('prefixes.admin.catalog.source_auto') : trans('prefixes.admin.catalog.source_manual') }}
-                            </td>
                             <td>
                                 @if($item->missing_since)
                                     {{ format_date($item->missing_since, true) }}
@@ -110,29 +98,10 @@
                                 @endif
                             </td>
                             <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
-                            <td class="text-end">
-                                <a href="{{ route('admin.prefixes.edit', $item) }}" class="btn btn-sm btn-outline-primary">
-                                    {{ trans('messages.actions.edit') }}
-                                </a>
-                                @if($item->override_display_name || $item->override_sort || $item->override_enabled)
-                                    <form action="{{ route('admin.prefixes.reset-auto', $item) }}" method="POST" class="d-inline">
-                                        @csrf
-                                        <button type="submit" class="btn btn-sm btn-outline-secondary">
-                                            {{ trans('prefixes.admin.catalog.reset_auto_btn') }}
-                                        </button>
-                                    </form>
-                                @endif
-                                <form action="{{ route('admin.prefixes.destroy', $item) }}" method="POST" class="d-inline"
-                                      onsubmit="return confirm(@json(trans('messages.actions.confirm') ?? 'OK'))">
-                                    @csrf
-                                    @method('DELETE')
-                                    <button type="submit" class="btn btn-sm btn-outline-danger">{{ trans('messages.actions.delete') }}</button>
-                                </form>
-                            </td>
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="10" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
+                            <td colspan="8" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
                         </tr>
                     @endforelse
                     </tbody>

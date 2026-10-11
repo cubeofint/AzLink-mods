@@ -166,6 +166,7 @@ class PrefixSelectionTest extends TestCase
             'enabled' => false,
         ]);
         PrefixCatalog::query()->create([
+            'server_id' => $this->server->id,
             'group' => 'miner',
             'display_name' => 'Шахтёр',
             'prefix_raw' => '&a[Шахтёр]',

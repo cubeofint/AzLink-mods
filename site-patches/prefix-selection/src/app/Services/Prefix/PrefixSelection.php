@@ -14,7 +14,8 @@ use RuntimeException;
  * Cabinet / admin view-model and the rules for creating a prefix_select op.
  *
  * Only quest-category groups are selectable. Donate / staff / media stay in game
- * and are not part of the cabinet list.
+ * and are not part of the cabinet list. LuckPerms catalog is per-server; leftover
+ * server_id NULL rows are ignored once that server has an export.
  */
 class PrefixSelection
 {
@@ -54,11 +55,7 @@ class PrefixSelection
             ->orderBy('name')
             ->get();
 
-        $catalogRows = PrefixCatalog::query()
-            ->where(function ($query) use ($ids) {
-                $query->whereNull('server_id')->orWhereIn('server_id', $ids);
-            })
-            ->get();
+        $catalogRows = PrefixCatalog::query()->whereIn('server_id', $ids)->get();
 
         $pending = PrefixOperation::query()
             ->where('user_id', $user->id)
@@ -90,7 +87,7 @@ class PrefixSelection
     }
 
     /**
-     * Quest groups only. Server catalog, then server_id NULL, then the player report.
+     * Quest groups only. Server catalog when present; otherwise prefix_raw from the player report.
      *
      * @param  Collection<string, PrefixCatalog>  $catalog
      * @return Collection<int, array<string, mixed>>

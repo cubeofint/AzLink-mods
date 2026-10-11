@@ -20,11 +20,7 @@ return new class extends Migration
                 $table->string('auto_prefix_raw', 255)->nullable()->after('prefix_raw');
                 $table->unsignedInteger('auto_sort')->default(0)->after('sort');
                 $table->integer('priority')->default(0)->after('auto_sort');
-                $table->string('source', 16)->default('manual')->after('enabled');
-                $table->boolean('override_display_name')->default(false)->after('source');
-                $table->boolean('override_sort')->default(false)->after('override_display_name');
-                $table->boolean('override_enabled')->default(false)->after('override_sort');
-                $table->timestamp('last_seen_at')->nullable()->after('override_enabled');
+                $table->timestamp('last_seen_at')->nullable()->after('enabled');
                 $table->timestamp('missing_since')->nullable()->after('last_seen_at');
 
                 $table->unique(['server_id', 'group']);
@@ -34,7 +30,6 @@ return new class extends Migration
 
             DB::table('prefix_catalog')->update([
                 'server_id' => null,
-                'source' => 'manual',
                 'auto_display_name' => DB::raw('display_name'),
                 'auto_prefix_raw' => DB::raw('prefix_raw'),
                 'auto_sort' => DB::raw('sort'),
@@ -72,10 +67,6 @@ return new class extends Migration
                     'auto_prefix_raw',
                     'auto_sort',
                     'priority',
-                    'source',
-                    'override_display_name',
-                    'override_sort',
-                    'override_enabled',
                     'last_seen_at',
                     'missing_since',
                 ]);

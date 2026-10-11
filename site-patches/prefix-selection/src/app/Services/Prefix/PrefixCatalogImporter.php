@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 /**
- * Game → site LuckPerms track export. Per-server upsert; admin overrides stay.
+ * Game → site LuckPerms track export. Per-server upsert; LuckPerms is source of truth.
  */
 class PrefixCatalogImporter
 {
@@ -53,16 +53,16 @@ class PrefixCatalogImporter
             $created = 0;
             $updated = 0;
 
-            foreach ($incoming as $group => $item) {
-                $row = $existing->get($group);
+            foreach ($incoming as $item) {
+                $row = $existing->get($item['group']);
                 if ($row === null) {
-                    PrefixCatalog::query()->create($this->newAutoAttributes($serverId, $item, $now));
+                    PrefixCatalog::query()->create($this->autoAttributes($serverId, $item, $now));
                     $created++;
 
                     continue;
                 }
 
-                $this->applyAutoUpdate($row, $item, $now);
+                $row->fill($this->autoAttributes($serverId, $item, $now));
                 $row->save();
                 $updated++;
             }
@@ -73,9 +73,7 @@ class PrefixCatalogImporter
                     if ($row->missing_since === null) {
                         $row->missing_since = $now;
                     }
-                    if (! $row->override_enabled) {
-                        $row->enabled = false;
-                    }
+                    $row->enabled = false;
                     $row->save();
                     $missing++;
                 }
@@ -128,60 +126,27 @@ class PrefixCatalogImporter
      * @param  array<string, mixed>  $item
      * @return array<string, mixed>
      */
-    private function newAutoAttributes(int $serverId, array $item, Carbon $now): array
+    private function autoAttributes(int $serverId, array $item, Carbon $now): array
     {
         $display = $item['display_name'] !== '' ? $item['display_name'] : $item['group'];
         $sort = $item['track_index'];
+        $raw = $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null;
 
         return [
             'server_id' => $serverId,
             'group' => $item['group'],
             'display_name' => $display,
             'auto_display_name' => $display,
-            'prefix_raw' => $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null,
-            'auto_prefix_raw' => $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null,
+            'prefix_raw' => $raw,
+            'auto_prefix_raw' => $raw,
             'category' => $item['category'],
             'sort' => $sort,
             'auto_sort' => $sort,
             'priority' => $item['priority'],
             'enabled' => true,
-            'source' => PrefixCatalog::SOURCE_AUTO,
-            'override_display_name' => false,
-            'override_sort' => false,
-            'override_enabled' => false,
             'last_seen_at' => $now,
             'missing_since' => null,
         ];
-    }
-
-    /**
-     * @param  array<string, mixed>  $item
-     */
-    private function applyAutoUpdate(PrefixCatalog $row, array $item, Carbon $now): void
-    {
-        $display = $item['display_name'] !== '' ? $item['display_name'] : $item['group'];
-        $sort = $item['track_index'];
-        $raw = $item['prefix_raw'] !== '' ? $item['prefix_raw'] : null;
-
-        $row->auto_display_name = $display;
-        $row->auto_prefix_raw = $raw;
-        $row->auto_sort = $sort;
-        $row->priority = $item['priority'];
-        $row->category = $item['category'];
-        $row->last_seen_at = $now;
-        $row->missing_since = null;
-
-        if (! $row->override_display_name) {
-            $row->display_name = $display;
-        }
-        if (! $row->override_sort) {
-            $row->sort = $sort;
-        }
-        $row->prefix_raw = $raw;
-
-        if (! $row->override_enabled) {
-            $row->enabled = true;
-        }
     }
 
     /**

@@ -8,10 +8,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Collection;
 
 /**
- * Display metadata for a chat prefix group key, optionally scoped to a server.
- *
- * Visible display_name / sort / enabled follow an admin override when the
- * matching override_* flag is set; otherwise they track the last auto import.
+ * Technical catalog of LuckPerms prefix groups for one AzLink server.
+ * Filled only by the game auto-export. Existing server_id NULL rows are leftovers.
  *
  * @property int $id
  * @property int|null $server_id
@@ -25,10 +23,6 @@ use Illuminate\Support\Collection;
  * @property int $auto_sort
  * @property int $priority
  * @property bool $enabled
- * @property string $source
- * @property bool $override_display_name
- * @property bool $override_sort
- * @property bool $override_enabled
  * @property \Carbon\Carbon|null $last_seen_at
  * @property \Carbon\Carbon|null $missing_since
  */
@@ -38,16 +32,11 @@ class PrefixCatalog extends Model
 
     public const CATEGORY_QUEST = 'quest';
 
-    public const SOURCE_AUTO = 'auto';
-
-    public const SOURCE_MANUAL = 'manual';
-
     protected $table = 'prefix_catalog';
 
     protected $fillable = [
         'server_id', 'group', 'display_name', 'auto_display_name', 'prefix_raw',
         'auto_prefix_raw', 'category', 'sort', 'auto_sort', 'priority', 'enabled',
-        'source', 'override_display_name', 'override_sort', 'override_enabled',
         'last_seen_at', 'missing_since',
     ];
 
@@ -56,9 +45,6 @@ class PrefixCatalog extends Model
         'auto_sort' => 'integer',
         'priority' => 'integer',
         'enabled' => 'boolean',
-        'override_display_name' => 'boolean',
-        'override_sort' => 'boolean',
-        'override_enabled' => 'boolean',
         'last_seen_at' => 'datetime',
         'missing_since' => 'datetime',
     ];
@@ -73,17 +59,8 @@ class PrefixCatalog extends Model
         return $query->where('enabled', true);
     }
 
-    public function isAuto(): bool
-    {
-        return $this->source === self::SOURCE_AUTO;
-    }
-
     public function visibleDisplayName(): string
     {
-        if ($this->override_display_name && filled($this->display_name)) {
-            return (string) $this->display_name;
-        }
-
         return (string) ($this->auto_display_name ?: $this->display_name ?: $this->group);
     }
 
@@ -96,24 +73,7 @@ class PrefixCatalog extends Model
 
     public function visibleSort(): int
     {
-        return $this->override_sort ? (int) $this->sort : (int) ($this->auto_sort ?: $this->sort);
-    }
-
-    public function visibleEnabled(): bool
-    {
-        return $this->override_enabled ? (bool) $this->enabled : (bool) $this->enabled;
-    }
-
-    public function resetToAuto(): void
-    {
-        $this->override_display_name = false;
-        $this->override_sort = false;
-        $this->override_enabled = false;
-        $this->display_name = $this->auto_display_name ?: $this->display_name;
-        $this->prefix_raw = $this->auto_prefix_raw ?: $this->prefix_raw;
-        $this->sort = (int) $this->auto_sort;
-        $this->enabled = $this->missing_since === null;
-        $this->save();
+        return (int) ($this->auto_sort ?: $this->sort);
     }
 
     public static function categoryLabel(string $category): string
@@ -130,20 +90,13 @@ class PrefixCatalog extends Model
     }
 
     /**
-     * Server-specific row wins; fall back to the global (server_id NULL) row.
+     * Server catalog only. NULL leftovers are ignored once that server has rows.
      *
      * @param  Collection<int, self>|null  $rows
      */
     public static function resolveForServer(int $serverId, string $group, ?Collection $rows = null): ?self
     {
-        $pool = $rows ?? static::query()->where('group', $group)
-            ->where(function (Builder $query) use ($serverId) {
-                $query->where('server_id', $serverId)->orWhereNull('server_id');
-            })
-            ->get();
-
-        return $pool->first(fn (self $row) => (int) $row->server_id === $serverId && $row->group === $group)
-            ?? $pool->first(fn (self $row) => $row->server_id === null && $row->group === $group);
+        return static::mapForServer($serverId, $rows)->get($group);
     }
 
     /**
@@ -151,20 +104,13 @@ class PrefixCatalog extends Model
      */
     public static function mapForServer(int $serverId, ?Collection $all = null): Collection
     {
-        $rows = $all ?? static::query()
-            ->where(function (Builder $query) use ($serverId) {
-                $query->where('server_id', $serverId)->orWhereNull('server_id');
-            })
-            ->get();
+        $rows = $all ?? static::query()->where('server_id', $serverId)->get();
+        $local = $rows->where('server_id', $serverId)->values();
 
-        $map = collect();
-        foreach ($rows->whereNull('server_id') as $row) {
-            $map->put($row->group, $row);
-        }
-        foreach ($rows->where('server_id', $serverId) as $row) {
-            $map->put($row->group, $row);
+        if ($local->isEmpty()) {
+            return collect();
         }
 
-        return $map;
+        return $local->keyBy('group');
     }
 }

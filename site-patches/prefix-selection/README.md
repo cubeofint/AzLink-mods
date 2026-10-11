@@ -35,9 +35,9 @@ See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
   (`Донатные и служебные префиксы отображаются всегда`). Staff can pick a quest
   prefix. A quest group with no catalog row is still shown from the player report.
   Disabled catalog rows are not shown.
-- Admin: catalog CRUD with preview, auto/manual + missing since, server filter,
-  last export time per server, «Сбросить на авто», player prefixes per server +
-  reset to Авто, operation log.
+- Admin `/admin/prefixes` is **read-only**: per-server list with preview, last
+  export time and missing groups. No catalog CRUD. Player prefixes + reset to
+  Авто and the operation log stay.
 - Flag `prefixes.enabled` (default **off**, endpoints 404). `prefixes.lease_seconds` default `30`.
 - `php artisan prefixes:check` — read-only dry-run.
 
@@ -58,12 +58,13 @@ User link: `users.game_id` (dashed or undashed UUID), then exact `name`. Unknown
 {"schema":1,"hash":"abc123","full":true,"groups":[{"group":"miner","prefix_raw":"&a[Шахтёр]","priority":10,"track_index":3,"display_name":"Шахтёр","category":"quest"}]}
 ```
 
-Per-server upsert by `(server_id, group)`. Updates only auto fields; visible
-`display_name` / `sort` / `enabled` keep an admin override when the matching flag
-is set. Same `hash` is a no-op. Empty `groups` or `full=false` disables nothing.
-A full export that would drop more than 50% of present groups needs `force: true`
-(otherwise `409 force_required`). Missing groups get `missing_since` +
-`enabled=false` (rows stay); they are re-enabled on return unless manually disabled.
+LuckPerms is the only source of truth. Per-server upsert by `(server_id, group)`
+writes auto fields and copies them onto the visible columns. Same `hash` is a
+no-op. Empty `groups` or `full=false` disables nothing. A full export that would
+drop more than 50% of present groups needs `force: true` (otherwise
+`409 force_required`). Missing groups get `missing_since` + `enabled=false`
+(rows stay) and are re-enabled when they return. Existing `server_id` NULL
+(manual) rows are ignored by the cabinet once that server has a catalog.
 
 ### Site → game: `GET /api/azlink/prefixes/operations?limit=50`
 
@@ -97,7 +98,8 @@ php artisan prefixes:check
 
 `0001`+`0002` are the deployed prefix series. **`0003` is incremental** — it does
 not rewrite `2026_10_11_000000_create_prefix_selection_tables`. Existing
-`prefix_catalog` rows keep `server_id` NULL and `source=manual`.
+`prefix_catalog` rows keep `server_id` NULL and are ignored once a server export
+exists.
 
 Optional: add `App\Providers\PrefixSelectionServiceProvider::class` to
 `bootstrap/providers.php` so the cabinet POST is also `/user/prefixes/select`.
@@ -131,6 +133,6 @@ MiniMessage / legacy → HTML conversion.
 
 1. `0001` — migrations, models, services, AzLink API + cabinet POST, artisan check, Feature tests.
 2. `0002` — cabinet tab, admin catalog/log/user reset, lang, theme partials, admin/profile route hunks.
-3. `0003` — per-server catalog import (`POST /api/azlink/prefixes/catalog`), quest-only
-   cabinet, reporter stores categories as given, admin auto/manual + missing since
-   + reset-to-auto + server filter. Incremental migration; does not rewrite `0001`.
+3. `0003` — per-server LuckPerms catalog import (`POST /api/azlink/prefixes/catalog`),
+   quest-only cabinet, reporter stores categories as given, read-only admin catalog
+   (no CRUD / overrides). Incremental migration; does not rewrite `0001`.
