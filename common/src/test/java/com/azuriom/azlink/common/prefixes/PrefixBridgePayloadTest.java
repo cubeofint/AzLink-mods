@@ -1,10 +1,16 @@
 package com.azuriom.azlink.common.prefixes;
 
 import com.azuriom.azlink.common.AzLinkPlugin;
+import com.azuriom.azlink.common.coins.CoinOperationsBridge;
+import com.azuriom.azlink.common.http.client.HttpClient;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -86,5 +92,35 @@ class PrefixBridgePayloadTest {
         JsonObject row = parsed.getAsJsonArray("operations").get(0).getAsJsonObject();
         assertEquals("prefix_select", row.get("type").getAsString());
         assertTrue(row.get("group").isJsonNull());
+    }
+
+    @Test
+    void cointcoreReflectiveNamesExistOnCoinBridgeAndPrefixBridge() throws NoSuchMethodException {
+        assertPublicStatic(CoinOperationsBridge.class, "postJson", String.class, String.class);
+        assertPublicStatic(CoinOperationsBridge.class, "getJson", String.class);
+        assertPublicStatic(CoinOperationsBridge.class, "reportPrefixes", String.class);
+        assertPublicStatic(CoinOperationsBridge.class, "fetchPrefixOperations", int.class);
+        assertPublicStatic(CoinOperationsBridge.class, "ackPrefix",
+                String.class, String.class, String.class, String.class);
+
+        assertPublicStatic(PrefixBridge.class, "postJson", String.class, String.class);
+        assertPublicStatic(PrefixBridge.class, "getJson", String.class);
+        assertPublicStatic(PrefixBridge.class, "reportPrefixes", String.class);
+        assertPublicStatic(PrefixBridge.class, "fetchPrefixOperations", int.class);
+        assertPublicStatic(PrefixBridge.class, "ackPrefix",
+                String.class, String.class, String.class, String.class);
+
+        assertEquals(CompletableFuture.class, HttpClient.class.getMethod(
+                "ackPrefix", String.class, String.class, String.class, String.class).getReturnType());
+        HttpClient.class.getMethod("reportPrefixes", JsonObject.class);
+        HttpClient.class.getMethod("fetchPrefixOperations", int.class);
+    }
+
+    private static void assertPublicStatic(Class<?> owner, String name, Class<?>... parameters)
+            throws NoSuchMethodException {
+        Method method = owner.getMethod(name, parameters);
+        assertTrue(Modifier.isStatic(method.getModifiers()), owner.getName() + "#" + name + " must be static");
+        assertTrue(Modifier.isPublic(method.getModifiers()), owner.getName() + "#" + name + " must be public");
+        assertEquals(CompletableFuture.class, method.getReturnType(), owner.getName() + "#" + name);
     }
 }

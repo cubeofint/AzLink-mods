@@ -10,16 +10,23 @@ Feature flag on the site: `prefixes.enabled` (default off; endpoints answer 404)
 
 ## Java API
 
-```java
-com.azuriom.azlink.common.prefixes.PrefixBridge
+cointcore (PR #34) reflects **`CoinOperationsBridge`** first. The same names exist on
+`PrefixBridge`. Paths passed in are `/azlink/prefixes/...`; AzLink `HttpClient` builds
+`siteUrl + "/api" + path`.
 
-boolean isAvailable()
-CompletableFuture<String> report(String json)
-CompletableFuture<String> fetchPending(int limit)
-CompletableFuture<String> ack(String opId, String status, String reason, String selected)
+```java
+// CoinOperationsBridge and PrefixBridge — exact names cointcore looks up
+static boolean isAvailable()
+static CompletableFuture<String> postJson(String path, String json)
+static CompletableFuture<String> getJson(String path)
+static CompletableFuture<String> reportPrefixes(String json)
+static CompletableFuture<String> fetchPrefixOperations(int limit)
+static CompletableFuture<String> ackPrefix(String opId, String status, String reason, String selected)
 ```
 
-Call reflectively, the same way as `CoinOperationsBridge`. `selected` may be `null` (Авто).
+`ackPrefix` status is **`applied` | `rejected`**. `selected` may be `null` (Авто).
+If the dedicated methods are missing, cointcore falls back to `HttpClient.request`
+via the `plugin` field on `CoinOperationsBridge`.
 
 ## Game → site: `POST /api/azlink/prefixes/report`
 

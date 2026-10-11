@@ -14,8 +14,11 @@ direction). Prefixes use a dedicated `prefix_operations` table. Gluon visibility
 (`CurrencyServerMovement::visibleTo`) is not touched.
 
 Game-side contract is implemented in parallel by cointcore. Keep it exact.
-The AzLink mod exposes [`PrefixBridge`](../../common/src/main/java/com/azuriom/azlink/common/prefixes/PrefixBridge.java)
-(mirrors `CoinOperationsBridge`). See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
+The AzLink mod exposes the names cointcore reflects on **`CoinOperationsBridge`**
+(`postJson` / `getJson` / `reportPrefixes` / `fetchPrefixOperations` / `ackPrefix`)
+and the same methods on [`PrefixBridge`](../../common/src/main/java/com/azuriom/azlink/common/prefixes/PrefixBridge.java).
+HttpClient paths are `/azlink/prefixes/...` → site `/api/azlink/prefixes/...`.
+See [`common/docs/PREFIX_BRIDGE.md`](../../common/docs/PREFIX_BRIDGE.md).
 
 ## What it adds
 
