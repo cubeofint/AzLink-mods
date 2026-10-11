@@ -1,9 +1,13 @@
 package com.azuriom.azlink.common.executor;
 
+import com.azuriom.azlink.common.executor.handlers.MockGroupGrantHandler;
+import com.azuriom.azlink.common.executor.handlers.MockGroupRevokeHandler;
+import com.azuriom.azlink.common.executor.handlers.MockKitCreditHandler;
 import com.azuriom.azlink.common.executor.handlers.MockKitRedeemHandler;
 import com.azuriom.azlink.common.executor.handlers.MockPrivilegeReconcileHandler;
 import com.azuriom.azlink.common.executor.handlers.MockPrivilegeRevokeHandler;
 import com.azuriom.azlink.common.executor.handlers.OperationHandler;
+import com.azuriom.azlink.common.executor.ledger.GrantedNodes;
 import com.azuriom.azlink.common.privileges.PrivilegeBackend;
 import com.azuriom.azlink.common.executor.ledger.EntitlementVersionLedger;
 import com.azuriom.azlink.common.executor.ledger.LedgerEntry;
@@ -58,17 +62,30 @@ public class SemanticExecutor {
         if (privilegeBackend == null) {
             this.handlers.put(OperationType.PRIVILEGE_RECONCILE, new MockPrivilegeReconcileHandler());
             this.handlers.put(OperationType.PRIVILEGE_REVOKE, new MockPrivilegeRevokeHandler());
+            this.handlers.put(OperationType.GROUP_GRANT, new MockGroupGrantHandler());
+            this.handlers.put(OperationType.GROUP_REVOKE, new MockGroupRevokeHandler());
         } else {
+            privilegeBackend.bindLedger(entitlementVersions);
             this.handlers.put(OperationType.PRIVILEGE_RECONCILE, privilegeBackend::reconcile);
             this.handlers.put(OperationType.PRIVILEGE_REVOKE, privilegeBackend::revoke);
+            this.handlers.put(OperationType.GROUP_GRANT, privilegeBackend::grantGroup);
+            this.handlers.put(OperationType.GROUP_REVOKE, privilegeBackend::revokeGroup);
         }
         this.handlers.put(OperationType.KIT_REDEEM, new MockKitRedeemHandler());
+        this.handlers.put(OperationType.KIT_CREDIT, new MockKitCreditHandler());
     }
 
     /** Replace the mock kit handler with a real platform implementation. */
     public void useKitRedeemHandler(OperationHandler handler) {
         if (handler != null) {
             this.handlers.put(OperationType.KIT_REDEEM, handler);
+        }
+    }
+
+    /** Replace the mock kit_credit handler with a real platform implementation. */
+    public void useKitCreditHandler(OperationHandler handler) {
+        if (handler != null) {
+            this.handlers.put(OperationType.KIT_CREDIT, handler);
         }
     }
 
@@ -148,7 +165,7 @@ public class SemanticExecutor {
         }
 
         OperationType type = operation.getOperationType();
-        if (type == OperationType.PRIVILEGE_RECONCILE || type == OperationType.PRIVILEGE_REVOKE) {
+        if (usesPlayerVersion(type) || usesGrantVersion(type)) {
             ExecutionResult versionGate = evaluateEntitlementVersion(operation);
             if (versionGate.getResultCode() != OperationResultCode.SUCCEEDED) {
                 persist(operation, versionGate);
@@ -179,10 +196,9 @@ public class SemanticExecutor {
         }
 
         if (applied.getResultCode() == OperationResultCode.SUCCEEDED
-                && (type == OperationType.PRIVILEGE_RECONCILE || type == OperationType.PRIVILEGE_REVOKE)) {
+                && (usesPlayerVersion(type) || usesGrantVersion(type))) {
             try {
-                this.entitlementVersions.putAppliedVersion(operation.getPlayerUuid(),
-                        operation.getEntitlementVersion());
+                persistEntitlementState(operation, type);
             } catch (IOException e) {
                 this.logger.error("[SemanticExecutor] entitlement version ledger write failed"
                         + " operation_id=" + operation.getOperationId(), e);
@@ -207,7 +223,9 @@ public class SemanticExecutor {
     private ExecutionResult evaluateEntitlementVersion(ShopOperation operation) {
         UUID player = operation.getPlayerUuid();
         long incoming = operation.getEntitlementVersion();
-        Optional<Long> appliedOpt = this.entitlementVersions.getAppliedVersion(player);
+        Optional<Long> appliedOpt = usesGrantVersion(operation.getOperationType())
+                ? this.entitlementVersions.getGrantVersion(player, operation.getEntitlementKey())
+                : this.entitlementVersions.getAppliedVersion(player);
 
         if (!appliedOpt.isPresent()) {
             return ExecutionResult.of(OperationResultCode.SUCCEEDED);
@@ -225,6 +243,51 @@ public class SemanticExecutor {
                     "entitlement_version already applied");
         }
         return ExecutionResult.of(OperationResultCode.SUCCEEDED);
+    }
+
+    private void persistEntitlementState(ShopOperation operation, OperationType type) throws IOException {
+        if (usesPlayerVersion(type)) {
+            this.entitlementVersions.putAppliedVersion(operation.getPlayerUuid(),
+                    operation.getEntitlementVersion());
+        }
+        if (!usesGrantVersion(type)) {
+            return;
+        }
+        String key = operation.getEntitlementKey();
+        Optional<GrantedNodes> existing = this.entitlementVersions.getGrant(operation.getPlayerUuid(), key);
+        if (existing.isPresent() && existing.get().getVersion() == operation.getEntitlementVersion().longValue()) {
+            if (type == OperationType.GROUP_REVOKE) {
+                this.entitlementVersions.removeGrant(operation.getPlayerUuid(), key);
+            }
+            return;
+        }
+        if (type == OperationType.GROUP_REVOKE) {
+            this.entitlementVersions.removeGrant(operation.getPlayerUuid(), key);
+            return;
+        }
+        Instant expiresAt = parseInstant(operation.getAbsoluteExpiresAt());
+        this.entitlementVersions.putGrant(operation.getPlayerUuid(),
+                GrantedNodes.versionOnly(key, operation.getEntitlementVersion(),
+                        operation.getGroup(), expiresAt));
+    }
+
+    private static boolean usesPlayerVersion(OperationType type) {
+        return type == OperationType.PRIVILEGE_RECONCILE || type == OperationType.PRIVILEGE_REVOKE;
+    }
+
+    private static boolean usesGrantVersion(OperationType type) {
+        return type == OperationType.GROUP_GRANT || type == OperationType.GROUP_REVOKE;
+    }
+
+    private static Instant parseInstant(String raw) {
+        if (raw == null || raw.trim().isEmpty()) {
+            return null;
+        }
+        try {
+            return Instant.parse(raw.trim());
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private void persistIfTerminalFailure(ShopOperation operation, ExecutionResult result) {

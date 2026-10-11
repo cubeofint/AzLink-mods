@@ -60,4 +60,16 @@ class PrivilegePlanCapabilityTest {
         assertEquals("2099-01-01T00:00:00Z", plan.getExpiresAt().toString());
         assertEquals("vip", plan.getGroupName());
     }
+
+    @Test
+    void groupGrantHasNoContextAndKeepsExpiry() {
+        PrivilegePlan plan = PrivilegePlan.groupGrant("pkg:vip", "vip",
+                java.time.Instant.parse("2099-01-01T00:00:00Z"));
+        assertNull(plan.getError());
+        assertEquals("vip", plan.getGroupName());
+        assertEquals("pkg:vip", plan.getEntitlementId());
+        assertEquals("2099-01-01T00:00:00Z", plan.getExpiresAt().toString());
+        assertFalse(plan.isClearOnly());
+        assertTrue(plan.getPermissions().isEmpty());
+    }
 }

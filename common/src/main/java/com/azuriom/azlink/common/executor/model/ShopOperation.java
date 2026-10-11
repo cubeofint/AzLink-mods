@@ -91,6 +91,10 @@ public class ShopOperation {
                 }
             }
         }
+        UUID topLevel = parseUuid(payloadString("uuid"));
+        if (topLevel != null) {
+            return topLevel;
+        }
         return parseUuid(payloadString("player_uuid"));
     }
 
@@ -124,15 +128,11 @@ public class ShopOperation {
                 return null;
             }
         }
-        if (this.payload == null || !this.payload.has("entitlement_version")
-                || this.payload.get("entitlement_version").isJsonNull()) {
-            return null;
+        Long topLevelVersion = payloadLong("version");
+        if (topLevelVersion != null) {
+            return topLevelVersion;
         }
-        try {
-            return this.payload.get("entitlement_version").getAsLong();
-        } catch (RuntimeException e) {
-            return null;
-        }
+        return payloadLong("entitlement_version");
     }
 
     public String getSemanticKey() {
@@ -143,11 +143,63 @@ public class ShopOperation {
                 return key;
             }
         }
+        String entitlementKey = payloadString("entitlement_key");
+        if (entitlementKey != null) {
+            return entitlementKey;
+        }
+        String group = payloadString("group");
+        if (group != null) {
+            return group;
+        }
+        String kit = payloadString("kit");
+        if (kit != null) {
+            return kit;
+        }
         String kitKey = payloadString("kit_key");
         if (kitKey != null) {
             return kitKey;
         }
         return payloadString("semantic_key");
+    }
+
+    public String getEntitlementKey() {
+        String key = payloadString("entitlement_key");
+        if (key != null) {
+            return key;
+        }
+        JsonObject entitlement = entitlementObject();
+        if (entitlement != null) {
+            String nested = jsonString(entitlement, "key");
+            if (nested != null) {
+                return nested;
+            }
+        }
+        return getSemanticKey();
+    }
+
+    public String getGroup() {
+        return payloadString("group");
+    }
+
+    public String getKit() {
+        String kit = payloadString("kit");
+        return kit != null ? kit : payloadString("kit_key");
+    }
+
+    public Integer getQty() {
+        Long qty = payloadLong("qty");
+        if (qty == null) {
+            qty = payloadLong("quantity");
+        }
+        return qty == null ? null : Integer.valueOf(qty.intValue());
+    }
+
+    public String getAbsoluteExpiresAt() {
+        String topLevel = payloadString("expires_at");
+        if (topLevel != null) {
+            return topLevel;
+        }
+        return getEntitlementExpiresAt();
     }
 
     public String getRedemptionId() {
@@ -190,6 +242,17 @@ public class ShopOperation {
             return null;
         }
         return jsonString(this.payload, key);
+    }
+
+    private Long payloadLong(String key) {
+        if (this.payload == null || !this.payload.has(key) || this.payload.get(key).isJsonNull()) {
+            return null;
+        }
+        try {
+            return this.payload.get(key).getAsLong();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private static String jsonString(JsonObject object, String key) {

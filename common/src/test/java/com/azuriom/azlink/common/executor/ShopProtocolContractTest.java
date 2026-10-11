@@ -33,12 +33,17 @@ class ShopProtocolContractTest {
         assertEquals("privilege_reconcile", OperationType.PRIVILEGE_RECONCILE.toWire());
         assertEquals("privilege_revoke", OperationType.PRIVILEGE_REVOKE.toWire());
         assertEquals("kit_redeem", OperationType.KIT_REDEEM.toWire());
+        assertEquals("group_grant", OperationType.GROUP_GRANT.toWire());
+        assertEquals("group_revoke", OperationType.GROUP_REVOKE.toWire());
+        assertEquals("kit_credit", OperationType.KIT_CREDIT.toWire());
     }
 
     @Test
     void snakeCaseDeserializesToEnum() {
         assertEquals(OperationType.PRIVILEGE_RECONCILE, OperationType.fromWire("privilege_reconcile"));
         assertEquals(OperationType.KIT_REDEEM, OperationType.fromWire("kit_redeem"));
+        assertEquals(OperationType.GROUP_GRANT, OperationType.fromWire("group_grant"));
+        assertEquals(OperationType.KIT_CREDIT, OperationType.fromWire("kit_credit"));
         assertNull(OperationType.fromWire("PRIVILEGE_RECONCILE"));
     }
 

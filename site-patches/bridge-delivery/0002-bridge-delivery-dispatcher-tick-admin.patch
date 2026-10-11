@@ -1,0 +1,582 @@
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Sun, 11 Oct 2026 20:10:00 +0500
+Subject: [PATCH 2/3] Bridge delivery: dispatcher, tick servers, admin deliveries
+
+Scope tick/dispatcher to shop.configured_delivery.servers. Fix renewal
+(Scheduled vs PendingActivation) and revoke on refund. Admin Доставки
+filters, problem counter, Retry and Mark delivered manually.
+
+diff --git a/plugins/shop/src/Services/ConfiguredDeliveryService.php b/plugins/shop/src/Services/ConfiguredDeliveryService.php
+index 1111111..2222222 100644
+--- a/plugins/shop/src/Services/ConfiguredDeliveryService.php
++++ b/plugins/shop/src/Services/ConfiguredDeliveryService.php
+@@ -14,6 +14,7 @@
+ use Azuriom\Plugin\Shop\Models\ConfiguredPurchaseKit;
+ use Azuriom\Plugin\Shop\Models\MinecraftOperation;
+ use Azuriom\Plugin\Shop\Models\UserPrivilegeEntitlement;
++use Azuriom\Plugin\Shop\Support\ConfiguredDeliveryServers;
+ use Illuminate\Support\Facades\Log;
+ use Illuminate\Support\Str;
+ use Throwable;
+@@ -21,13 +22,7 @@
+ /**
+  * In-game delivery of configured privilege purchases through the AzLink semantic executor.
+  *
+- * pending purchase  -> privilege_reconcile (LuckPerms group + capabilities, node expiry = purchase end)
+- *                   + kit_redeem per kit line (cointcore kit credits, works offline)
+- * all ops succeeded -> purchase active, delivery_status delivered
+- * any op failed     -> delivery_status failed (site retries retryable failures itself, see transport)
+- * term ended        -> entitlement expired, privilege_revoke (or successor reconciled)
+- *
+- * Every operation has a deterministic operation_key, so dispatching twice is a replay (exactly once).
++ * Only servers listed in shop.configured_delivery.servers are touched.
+  * Off unless setting shop.configured_delivery.enabled = 1.
+  */
+ class ConfiguredDeliveryService
+@@ -43,19 +38,28 @@
+         return (bool) setting('shop.configured_delivery.enabled', false);
+     }
+ 
+-    /** @return array{dispatched: int, refreshed: int, expired: int} */
++    /** @return array{dispatched: int, refreshed: int, expired: int, revoked: int} */
+     public function tick(): array
+     {
+-        $stats = ['dispatched' => 0, 'refreshed' => 0, 'expired' => 0];
++        $stats = ['dispatched' => 0, 'refreshed' => 0, 'expired' => 0, 'revoked' => 0];
+ 
+         if (! self::enabled()) {
+             return $stats;
+         }
+ 
++        $servers = ConfiguredDeliveryServers::ids();
++        if ($servers === []) {
++            return $stats;
++        }
++
+         ConfiguredPrivilegePurchase::query()
+-            ->where('status', ConfiguredPurchaseStatus::PendingActivation)
++            ->whereIn('status', [
++                ConfiguredPurchaseStatus::PendingActivation,
++                ConfiguredPurchaseStatus::Scheduled,
++            ])
+             ->where('delivery_status', ConfiguredDeliveryStatus::Pending)
+             ->where('starts_at', '<=', now())
++            ->whereIn('server_id', $servers)
+             ->orderBy('id')->limit(100)->get()
+             ->each(function (ConfiguredPrivilegePurchase $p) use (&$stats) {
+                 $this->guard($p, fn () => $this->dispatch($p)) && $stats['dispatched']++;
+@@ -67,6 +71,7 @@
+                 ConfiguredDeliveryStatus::Failed, ConfiguredDeliveryStatus::Uncertain,
+             ])
+             ->whereIn('status', [ConfiguredPurchaseStatus::PendingActivation, ConfiguredPurchaseStatus::DeliveryFailed])
++            ->whereIn('server_id', $servers)
+             ->orderBy('id')->limit(200)->get()
+             ->each(function (ConfiguredPrivilegePurchase $p) use (&$stats) {
+                 $this->guard($p, fn () => $this->refresh($p)) && $stats['refreshed']++;
+@@ -75,16 +80,41 @@
+         UserPrivilegeEntitlement::query()
+             ->where('status', UserPrivilegeEntitlementStatus::Active)
+             ->where('expires_at', '<=', now())
++            ->whereIn('server_id', $servers)
+             ->orderBy('id')->limit(100)->get()
+             ->each(function (UserPrivilegeEntitlement $e) use (&$stats) {
+                 $this->guard($e, fn () => $this->expire($e)) && $stats['expired']++;
+             });
+ 
++        ConfiguredPrivilegePurchase::query()
++            ->whereIn('status', [
++                ConfiguredPurchaseStatus::Refunded,
++                ConfiguredPurchaseStatus::Revoked,
++            ])
++            ->whereIn('server_id', $servers)
++            ->orderBy('id')->limit(100)->get()
++            ->each(function (ConfiguredPrivilegePurchase $p) use (&$stats) {
++                $already = MinecraftOperation::query()
++                    ->where('purchase_id', $p->id)
++                    ->where('type', MinecraftOperationType::PrivilegeRevoke)
++                    ->exists();
++                if ($already) {
++                    return;
++                }
++                $this->guard($p, fn () => $this->revokePurchase($p)) && $stats['revoked']++;
++            });
++
+         return $stats;
+     }
+ 
+     public function dispatch(ConfiguredPrivilegePurchase $purchase): void
+     {
++        if (! ConfiguredDeliveryServers::allows((int) $purchase->server_id)) {
++            Log::info('[shop] configured delivery skip server '.$purchase->server_id);
++
++            return;
++        }
++
+         $purchase->loadMissing(['user', 'serverConfiguration', 'kits.kit', 'entitlement']);
+         $uuid = $this->playerUuid($purchase);
+         $entitlement = $purchase->entitlement
+@@ -153,10 +183,18 @@
+     public function expire(UserPrivilegeEntitlement $entitlement): void
+     {
+         $purchase = ConfiguredPrivilegePurchase::with('user')->findOrFail($entitlement->current_purchase_id);
++        if (! ConfiguredDeliveryServers::allows((int) $purchase->server_id)) {
++            return;
++        }
++
+         $updated = $this->entitlements->expireCurrent($purchase->user, $entitlement->server_id, $purchase->id, $entitlement->version);
+ 
+         if ($updated->status === UserPrivilegeEntitlementStatus::PendingActivation) {
+-            // Renewal: the successor reconcile replaces the same entitlement nodes on the server.
++            $successor = ConfiguredPrivilegePurchase::query()->find($updated->current_purchase_id);
++            if ($successor !== null && $successor->delivery_status === ConfiguredDeliveryStatus::Pending) {
++                $this->dispatch($successor);
++            }
++
+             return;
+         }
+ 
+@@ -170,6 +208,41 @@
+         ));
+     }
+ 
++    public function revokePurchase(ConfiguredPrivilegePurchase $purchase): void
++    {
++        if (! ConfiguredDeliveryServers::allows((int) $purchase->server_id)) {
++            return;
++        }
++
++        $purchase->loadMissing(['user', 'entitlement']);
++        $entitlement = $purchase->entitlement
++            ?? UserPrivilegeEntitlement::where('current_purchase_id', $purchase->id)->first();
++        if ($entitlement === null) {
++            return;
++        }
++
++        if (! in_array($entitlement->status, [
++            UserPrivilegeEntitlementStatus::Revoked,
++            UserPrivilegeEntitlementStatus::Expired,
++        ], true)) {
++            $entitlement = $this->entitlements->revoke(
++                $purchase->user,
++                $purchase->server_id,
++                $purchase->id,
++                $entitlement->version,
++            );
++        }
++
++        $this->dispatcher->revoke(new PrivilegeRevokeRequest(
++            $entitlement->id,
++            $entitlement->version,
++            $purchase->id,
++            $purchase->server_id,
++            $this->playerUuid($purchase),
++            $this->entitlementKey($purchase),
++        ));
++    }
++
+     private function guard(object $model, callable $fn): bool
+     {
+         try {
+diff --git a/plugins/shop/src/Services/MinecraftOperationDispatcher.php b/plugins/shop/src/Services/MinecraftOperationDispatcher.php
+index 1111111..2222222 100644
+--- a/plugins/shop/src/Services/MinecraftOperationDispatcher.php
++++ b/plugins/shop/src/Services/MinecraftOperationDispatcher.php
+@@ -2,6 +2,9 @@
+ 
+ namespace Azuriom\Plugin\Shop\Services;
+ 
++use Azuriom\Plugin\Shop\Data\GroupGrantRequest;
++use Azuriom\Plugin\Shop\Data\GroupRevokeRequest;
++use Azuriom\Plugin\Shop\Data\KitCreditRequest;
+ use Azuriom\Plugin\Shop\Data\KitRedeemRequest;
+ use Azuriom\Plugin\Shop\Data\PrivilegeReconcileRequest;
+ use Azuriom\Plugin\Shop\Data\PrivilegeRevokeRequest;
+@@ -11,6 +14,7 @@
+ use Azuriom\Plugin\Shop\Models\MinecraftOperation;
+ use Azuriom\Plugin\Shop\Models\UserPrivilegeEntitlement;
+ use Azuriom\Plugin\Shop\Support\CanonicalJson;
++use Azuriom\Plugin\Shop\Support\ConfiguredDeliveryServers;
+ use Illuminate\Database\QueryException;
+ use Illuminate\Support\Str;
+ use InvalidArgumentException;
+@@ -113,6 +117,113 @@
+         );
+     }
+ 
++    public function grantGroup(GroupGrantRequest $request): MinecraftOperation
++    {
++        $this->assertSemanticKey($request->entitlementKey);
++
++        return $this->dispatch(
++            MinecraftOperationType::GroupGrant,
++            $request->operationKey,
++            $request->serverId,
++            $request->playerUuid,
++            BridgeOperationPayloads::groupGrant(
++                $request->playerUuid,
++                $request->group,
++                $request->expiresAt,
++                $request->entitlementKey,
++                $request->version,
++            ),
++            entitlementVersion: $request->version,
++            purchaseId: $request->purchaseId,
++        );
++    }
++
++    public function revokeGroup(GroupRevokeRequest $request): MinecraftOperation
++    {
++        $this->assertSemanticKey($request->entitlementKey);
++
++        return $this->dispatch(
++            MinecraftOperationType::GroupRevoke,
++            $request->operationKey,
++            $request->serverId,
++            $request->playerUuid,
++            BridgeOperationPayloads::groupRevoke(
++                $request->playerUuid,
++                $request->group,
++                $request->entitlementKey,
++                $request->version,
++            ),
++            entitlementVersion: $request->version,
++            purchaseId: $request->purchaseId,
++        );
++    }
++
++    public function creditKit(KitCreditRequest $request): MinecraftOperation
++    {
++        if ($request->qty < 1) {
++            throw new InvalidArgumentException('qty must be >= 1.');
++        }
++
++        return $this->dispatch(
++            MinecraftOperationType::KitCredit,
++            $request->operationKey,
++            $request->serverId,
++            $request->playerUuid,
++            BridgeOperationPayloads::kitCredit($request->playerUuid, $request->kit, $request->qty),
++            purchaseId: $request->purchaseId,
++        );
++    }
++
++    public function failNoUuid(
++        MinecraftOperationType $type,
++        string $operationKey,
++        int $serverId,
++        array $payload,
++        ?int $purchaseId = null,
++    ): MinecraftOperation {
++        $existing = MinecraftOperation::where('server_id', $serverId)
++            ->where('operation_key', $operationKey)->first();
++        if ($existing !== null) {
++            return $existing;
++        }
++
++        $payload = CanonicalJson::normalize($payload);
++        $hash = CanonicalJson::hash($payload);
++
++        return MinecraftOperation::create([
++            'operation_id' => (string) Str::uuid(),
++            'operation_key' => $operationKey,
++            'server_id' => $serverId,
++            'type' => $type,
++            'status' => MinecraftOperationStatus::Failed,
++            'purchase_id' => $purchaseId,
++            'player_uuid' => '00000000-0000-0000-0000-000000000000',
++            'protocol_version' => self::PROTOCOL_VERSION,
++            'payload' => $payload,
++            'payload_hash' => $hash,
++            'available_at' => now(),
++            'result_code' => 'failed:no_uuid',
++            'last_error' => 'user has no Minecraft UUID (users.game_id)',
++            'completed_at' => now(),
++        ]);
++    }
++
++    public function nextGrantVersion(string $playerUuid, string $entitlementKey): int
++    {
++        $max = MinecraftOperation::query()
++            ->where('player_uuid', $playerUuid)
++            ->whereIn('type', [MinecraftOperationType::GroupGrant, MinecraftOperationType::GroupRevoke])
++            ->get()
++            ->map(function (MinecraftOperation $op) use ($entitlementKey) {
++                $key = data_get($op->payload, 'entitlement_key');
++
++                return $key === $entitlementKey ? (int) ($op->entitlement_version ?? data_get($op->payload, 'version')) : 0;
++            })
++            ->max();
++
++        return max(1, (int) $max + 1);
++    }
++
+     private function dispatch(
+         MinecraftOperationType $type,
+         string $operationKey,
+@@ -124,6 +235,9 @@
+         ?int $purchaseId = null,
+         ?int $redemptionId = null,
+     ): MinecraftOperation {
++        if (! ConfiguredDeliveryServers::allows($serverId)) {
++            throw new InvalidArgumentException("Server {$serverId} is not in shop.configured_delivery.servers");
++        }
+         if (! Str::isUuid($playerUuid)) {
+             throw new InvalidArgumentException('player_uuid must be a UUID.');
+         }
+diff --git a/plugins/shop/src/Controllers/Admin/DeliveryController.php b/plugins/shop/src/Controllers/Admin/DeliveryController.php
+index 1111111..2222222 100644
+--- a/plugins/shop/src/Controllers/Admin/DeliveryController.php
++++ b/plugins/shop/src/Controllers/Admin/DeliveryController.php
+@@ -3,30 +3,104 @@
+ namespace Azuriom\Plugin\Shop\Controllers\Admin;
+ 
+ use Azuriom\Http\Controllers\Controller;
++use Azuriom\Models\Server;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationStatus;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
+ use Azuriom\Plugin\Shop\Models\MinecraftOperation;
+ use Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService;
+ use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
++use Illuminate\View\View;
+ 
+ class DeliveryController extends Controller
+ {
+-    public function index(Request $request)
++    public function index(Request $request): View
+     {
+         $status = $request->input('status');
++        $type = $request->input('type');
++        $serverId = $request->input('server_id');
++        $player = trim((string) $request->input('player'));
+         $purchase = $request->input('purchase_id');
+ 
+         $operations = MinecraftOperation::with(['server', 'purchase.user', 'attempts'])
+             ->when($status, fn (Builder $q) => $q->where('status', $status))
++            ->when($type, fn (Builder $q) => $q->where('type', $type))
++            ->when($serverId, fn (Builder $q) => $q->where('server_id', $serverId))
+             ->when($purchase, fn (Builder $q) => $q->where('purchase_id', $purchase))
++            ->when($player !== '', function (Builder $q) use ($player) {
++                $q->where(function (Builder $inner) use ($player) {
++                    $inner->where('player_uuid', 'like', '%'.$player.'%')
++                        ->orWhereHas('purchase.user', fn (Builder $user) => $user
++                            ->where('name', 'like', '%'.$player.'%')
++                            ->orWhere('game_id', 'like', '%'.$player.'%'));
++                });
++            })
+             ->latest('id')
+             ->paginate(50)
+             ->withQueryString();
+ 
++        $problems = MinecraftOperation::query()
++            ->where(function (Builder $q) {
++                $q->whereIn('status', [
++                    MinecraftOperationStatus::Failed,
++                    MinecraftOperationStatus::Uncertain,
++                ])->orWhere('result_code', 'failed:no_uuid');
++            })
++            ->count();
++
+         return view('shop::admin.deliveries.index', [
+             'operations' => $operations,
+             'status' => $status,
++            'type' => $type,
++            'serverId' => $serverId,
++            'player' => $player,
+             'purchaseId' => $purchase,
++            'servers' => Server::query()->orderBy('name')->get(['id', 'name']),
++            'types' => MinecraftOperationType::cases(),
++            'problems' => $problems,
+             'enabled' => ConfiguredDeliveryService::enabled(),
+         ]);
+     }
++
++    public function retry(MinecraftOperation $operation): RedirectResponse
++    {
++        $operation->forceFill([
++            'status' => MinecraftOperationStatus::Pending,
++            'available_at' => now(),
++            'completed_at' => null,
++            'result_code' => null,
++        ])->save();
++
++        foreach (['claim_token', 'lease_expires_at', 'leased_until'] as $column) {
++            if ($operation->isFillable($column) || array_key_exists($column, $operation->getAttributes())) {
++                $operation->forceFill([$column => null])->save();
++            }
++        }
++
++        return redirect()->back()->with('success', 'Операция #'.$operation->id.' поставлена в очередь повторно.');
++    }
++
++    public function markDelivered(MinecraftOperation $operation): RedirectResponse
++    {
++        $operation->forceFill([
++            'status' => MinecraftOperationStatus::Succeeded,
++            'result_code' => 'manual',
++            'last_error' => null,
++            'completed_at' => now(),
++        ])->save();
++
++        if ($operation->purchase_id && ConfiguredDeliveryService::enabled()) {
++            try {
++                $purchase = $operation->purchase;
++                if ($purchase !== null) {
++                    app(ConfiguredDeliveryService::class)->refresh($purchase);
++                }
++            } catch (\Throwable $e) {
++                // keep the manual mark even if purchase refresh fails
++            }
++        }
++
++        return redirect()->back()->with('success', 'Операция #'.$operation->id.' отмечена как доставленная.');
++    }
+ }
+diff --git a/plugins/shop/resources/views/admin/deliveries/index.blade.php b/plugins/shop/resources/views/admin/deliveries/index.blade.php
+index 1111111..2222222 100644
+--- a/plugins/shop/resources/views/admin/deliveries/index.blade.php
++++ b/plugins/shop/resources/views/admin/deliveries/index.blade.php
+@@ -1,20 +1,43 @@
+ @extends('admin.layouts.admin')
+ 
+-@section('title', 'Выдача в игре')
++@section('title', 'Доставки')
+ 
+ @section('content')
+     @unless($enabled)
+-        <div class="alert alert-info">Автоматическая выдача выключена (настройка <code>shop.configured_delivery.enabled</code>). Операции ниже не создаются, пока флаг выключен.</div>
++        <div class="alert alert-info">Автоматическая выдача выключена (настройка <code>shop.configured_delivery.enabled</code>). Операции ниже не создаются tick(), пока флаг выключен. Пакеты с mode=bridge всё равно пишут операции, если сервер есть в <code>shop.configured_delivery.servers</code>.</div>
+     @endunless
++
++    <div class="alert {{ $problems > 0 ? 'alert-warning' : 'alert-success' }}">
++        Проблемных доставок: <strong>{{ $problems }}</strong>
++        <span class="small text-muted">(failed, uncertain, failed:no_uuid)</span>
++    </div>
+ 
+     <div class="card shadow mb-4">
+         <div class="card-body">
+             <form method="GET" class="row g-3 mb-4">
+-                <div class="col-md-3">
+-                    <label class="form-label" for="purchaseInput">Покупка #</label>
+-                    <input type="number" class="form-control" id="purchaseInput" name="purchase_id" value="{{ $purchaseId }}">
++                <div class="col-md-2">
++                    <label class="form-label" for="serverInput">Сервер</label>
++                    <select class="form-select" id="serverInput" name="server_id">
++                        <option value="">Все</option>
++                        @foreach($servers as $server)
++                            <option value="{{ $server->id }}" @selected((string) $serverId === (string) $server->id)>{{ $server->name }} (#{{ $server->id }})</option>
++                        @endforeach
++                    </select>
+                 </div>
+-                <div class="col-md-3">
++                <div class="col-md-2">
++                    <label class="form-label" for="playerInput">Игрок</label>
++                    <input type="text" class="form-control" id="playerInput" name="player" value="{{ $player }}" placeholder="ник или UUID">
++                </div>
++                <div class="col-md-2">
++                    <label class="form-label" for="typeInput">Тип</label>
++                    <select class="form-select" id="typeInput" name="type">
++                        <option value="">Все</option>
++                        @foreach($types as $case)
++                            <option value="{{ $case->value }}" @selected($type === $case->value)>{{ $case->value }}</option>
++                        @endforeach
++                    </select>
++                </div>
++                <div class="col-md-2">
+                     <label class="form-label" for="statusInput">Статус</label>
+                     <select class="form-select" id="statusInput" name="status">
+                         <option value="">Все</option>
+@@ -23,7 +46,11 @@
+                         @endforeach
+                     </select>
+                 </div>
+-                <div class="col-md-3 d-flex align-items-end">
++                <div class="col-md-2">
++                    <label class="form-label" for="purchaseInput">Покупка #</label>
++                    <input type="number" class="form-control" id="purchaseInput" name="purchase_id" value="{{ $purchaseId }}">
++                </div>
++                <div class="col-md-2 d-flex align-items-end">
+                     <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> {{ trans('messages.actions.search') }}</button>
+                 </div>
+             </form>
+@@ -39,8 +66,9 @@
+                         <th>Операция</th>
+                         <th>Статус</th>
+                         <th>Попытки</th>
+-                        <th>Результат</th>
++                        <th>Ошибка</th>
+                         <th>{{ trans('messages.fields.date') }}</th>
++                        <th></th>
+                     </tr>
+                     </thead>
+                     <tbody>
+@@ -57,24 +85,35 @@
+                                 @if($op->purchase_id)
+                                     #{{ $op->purchase_id }}
+                                     <div class="small text-muted">{{ $op->purchase?->privilege_name_snapshot }} · {{ $op->purchase?->delivery_status?->value }}</div>
+-                                @else — @endif
++                                @else
++                                    <span class="small text-muted">{{ $op->operation_key }}</span>
++                                @endif
+                             </td>
+                             <td>
+                                 @if($op->purchase?->user)
+                                     <a href="{{ route('admin.users.edit', $op->purchase->user) }}">{{ $op->purchase->user->name }}</a>
+-                                @else
+-                                    <span class="small">{{ $op->player_uuid }}</span>
+                                 @endif
++                                <div class="small">{{ $op->player_uuid }}</div>
+                             </td>
+                             <td>{{ $op->server?->name ?? '—' }}</td>
+                             <td><code>{{ $op->type->value }}</code></td>
+                             <td><span class="badge bg-{{ $badge }}">{{ $op->status->value }}</span></td>
+                             <td>{{ $op->attempts_count }}</td>
+-                            <td class="small">{{ $op->result_code ?? '—' }}@if($op->last_error)<div class="text-danger">{{ \Illuminate\Support\Str::limit($op->last_error, 120) }}</div>@endif</td>
++                            <td class="small">{{ $op->result_code ?? '—' }}@if($op->last_error)<div class="text-danger">{{ \Illuminate\Support\Str::limit($op->last_error, 160) }}</div>@endif</td>
+                             <td class="text-nowrap">{{ format_date($op->created_at, true) }}@if($op->completed_at)<div class="small text-muted">{{ format_date($op->completed_at, true) }}</div>@endif</td>
++                            <td class="text-nowrap">
++                                <form method="POST" action="{{ route('shop.admin.deliveries.retry', $op) }}" class="d-inline">
++                                    @csrf
++                                    <button type="submit" class="btn btn-sm btn-outline-primary">Retry</button>
++                                </form>
++                                <form method="POST" action="{{ route('shop.admin.deliveries.mark', $op) }}" class="d-inline" onsubmit="return confirm('Отметить как доставленную вручную?')">
++                                    @csrf
++                                    <button type="submit" class="btn btn-sm btn-outline-secondary">Mark delivered manually</button>
++                                </form>
++                            </td>
+                         </tr>
+                     @empty
+-                        <tr><td colspan="9" class="text-center text-muted">{{ trans('messages.none') }}</td></tr>
++                        <tr><td colspan="10" class="text-center text-muted">{{ trans('messages.none') }}</td></tr>
+                     @endforelse
+                     </tbody>
+                 </table>
+diff --git a/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php b/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php
+index 1111111..2222222 100644
+--- a/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php
++++ b/plugins/shop/src/Commands/ConfiguredDeliveryCommand.php
+@@ -3,6 +3,7 @@
+ namespace Azuriom\Plugin\Shop\Commands;
+ 
+ use Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService;
++use Azuriom\Plugin\Shop\Support\ConfiguredDeliveryServers;
+ use Illuminate\Console\Command;
+ 
+ class ConfiguredDeliveryCommand extends Command
+@@ -19,8 +20,14 @@
+             return self::SUCCESS;
+         }
+ 
++        if (ConfiguredDeliveryServers::ids() === []) {
++            $this->line('shop.configured_delivery.servers is empty — nobody');
++
++            return self::SUCCESS;
++        }
++
+         $stats = $delivery->tick();
+-        $this->info("dispatched={$stats['dispatched']} refreshed={$stats['refreshed']} expired={$stats['expired']}");
++        $this->info("dispatched={$stats['dispatched']} refreshed={$stats['refreshed']} expired={$stats['expired']} revoked={$stats['revoked']}");
+ 
+         return self::SUCCESS;
+     }

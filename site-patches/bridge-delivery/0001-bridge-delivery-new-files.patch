@@ -1,0 +1,865 @@
+From: mawleesys <alsoalberdo@gmail.com>
+Date: Sun, 11 Oct 2026 20:00:00 +0500
+Subject: [PATCH 1/3] Bridge delivery: new shop services, check command, admin editor
+
+Adds typed group_grant / group_revoke / kit_credit helpers, server CSV
+scope, package bridge dispatcher, dry-run artisan command, deliveries
+editor partial, and unit tests. Kit credits never expire.
+
+diff --git a/plugins/shop/src/Support/ConfiguredDeliveryServers.php b/plugins/shop/src/Support/ConfiguredDeliveryServers.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Support/ConfiguredDeliveryServers.php
+@@ -0,0 +1,41 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Support;
++
++/**
++ * CSV of Azuriom server ids in shop.configured_delivery.servers.
++ * Empty list means nobody — tick() and the dispatcher do not act.
++ */
++final class ConfiguredDeliveryServers
++{
++    public static function raw(): string
++    {
++        return trim((string) setting('shop.configured_delivery.servers', ''));
++    }
++
++    /**
++     * @return list<int>
++     */
++    public static function ids(?string $raw = null): array
++    {
++        $value = $raw ?? self::raw();
++        if ($value === '') {
++            return [];
++        }
++
++        $ids = [];
++        foreach (explode(',', $value) as $part) {
++            $id = (int) trim($part);
++            if ($id > 0) {
++                $ids[$id] = $id;
++            }
++        }
++
++        return array_values($ids);
++    }
++
++    public static function allows(int $serverId, ?string $raw = null): bool
++    {
++        return in_array($serverId, self::ids($raw), true);
++    }
++}
+diff --git a/plugins/shop/src/Services/BridgeExpiry.php b/plugins/shop/src/Services/BridgeExpiry.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Services/BridgeExpiry.php
+@@ -0,0 +1,148 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Services;
++
++use Azuriom\Models\User;
++use Azuriom\Plugin\Shop\Models\Package;
++use Azuriom\Plugin\Shop\Models\PaymentItem;
++use Carbon\CarbonInterface;
++use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\Schema;
++
++/**
++ * Absolute privilege expiry: max(current end, now) + N calendar months.
++ * Current end is taken from shop_subscriptions.ends_at or user_package_states.
++ */
++final class BridgeExpiry
++{
++    public static function addMonths(CarbonInterface $from, int $months): Carbon
++    {
++        $start = $from->greaterThan(now()) ? $from->toImmutable() : now();
++
++        return Carbon::parse($start)->addMonthsNoOverflow(max(0, $months));
++    }
++
++    public static function absoluteEnd(?CarbonInterface $currentEnd, int $months): Carbon
++    {
++        return self::addMonths($currentEnd ?? now(), $months);
++    }
++
++    public static function currentEnd(User $user, Package $package): ?Carbon
++    {
++        $fromSubscription = self::subscriptionEnd($user, $package);
++        $fromState = self::packageStateEnd($user, $package);
++        $candidates = array_values(array_filter([$fromSubscription, $fromState]));
++        if ($candidates === []) {
++            return null;
++        }
++
++        return collect($candidates)->sort()->last();
++    }
++
++    public static function monthsFromPackage(Package $package): int
++    {
++        if (method_exists($package, 'subscriptionPeriodCount') && $package->subscriptionPeriodCount() > 0) {
++            $count = $package->subscriptionPeriodCount();
++            $unit = $package->subscriptionPeriodUnit();
++
++            return match ($unit) {
++                'year', 'years' => $count * 12,
++                'week', 'weeks' => max(1, (int) ceil($count / 4)),
++                'day', 'days' => max(1, (int) ceil($count / 30)),
++                default => $count,
++            };
++        }
++
++        $period = (string) ($package->billing_period ?? '');
++        if ($period === '') {
++            return 1;
++        }
++
++        $count = (int) \Illuminate\Support\Str::before($period, ' ');
++        $unit = \Illuminate\Support\Str::after($period, ' ');
++
++        return match ($unit) {
++            'year', 'years' => max(1, $count) * 12,
++            'week', 'weeks' => max(1, (int) ceil(max(1, $count) / 4)),
++            'day', 'days' => max(1, (int) ceil(max(1, $count) / 30)),
++            default => max(1, $count),
++        };
++    }
++
++    public static function resolveMonths(Package $package, PaymentItem $item, string $duration): int
++    {
++        $duration = trim($duration);
++        if ($duration === '' || $duration === 'package') {
++            return self::monthsFromPackage($package);
++        }
++        if ($duration === '{duration_months}') {
++            $fromItem = data_get($item->variables ?? [], 'duration_months');
++            if (is_numeric($fromItem)) {
++                return max(1, (int) $fromItem);
++            }
++
++            return self::monthsFromPackage($package);
++        }
++        if (is_numeric($duration)) {
++            return max(1, (int) $duration);
++        }
++
++        return self::monthsFromPackage($package);
++    }
++
++    public static function resolveQty(Package $package, PaymentItem $item, string $qty): int
++    {
++        $qty = trim($qty);
++        if ($qty === '' || $qty === '{quantity}') {
++            return max(1, (int) $item->quantity);
++        }
++        if ($qty === '{duration_months}') {
++            return self::monthsFromPackage($package);
++        }
++        if (is_numeric($qty)) {
++            return max(1, (int) $qty);
++        }
++
++        return max(1, (int) $item->quantity);
++    }
++
++    private static function subscriptionEnd(User $user, Package $package): ?Carbon
++    {
++        if (! Schema::hasTable('shop_subscriptions')) {
++            return null;
++        }
++
++        $end = \Illuminate\Support\Facades\DB::table('shop_subscriptions')
++            ->where('user_id', $user->id)
++            ->where('package_id', $package->id)
++            ->whereIn('status', ['active', 'canceled'])
++            ->orderByDesc('ends_at')
++            ->value('ends_at');
++
++        return $end !== null ? Carbon::parse($end) : null;
++    }
++
++    private static function packageStateEnd(User $user, Package $package): ?Carbon
++    {
++        if (! Schema::hasTable('user_package_states')) {
++            return null;
++        }
++
++        $row = \Illuminate\Support\Facades\DB::table('user_package_states')
++            ->where('user_id', $user->id)
++            ->where('package_id', $package->id)
++            ->orderByDesc('id')
++            ->first();
++        if ($row === null) {
++            return null;
++        }
++
++        foreach (['ends_at', 'expires_at', 'valid_until'] as $column) {
++            if (isset($row->{$column}) && $row->{$column} !== null) {
++                return Carbon::parse($row->{$column});
++            }
++        }
++
++        return null;
++    }
++}
+diff --git a/plugins/shop/src/Services/BridgeOperationPayloads.php b/plugins/shop/src/Services/BridgeOperationPayloads.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Services/BridgeOperationPayloads.php
+@@ -0,0 +1,66 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Services;
++
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
++
++/**
++ * Wire payloads for group_grant / group_revoke / kit_credit.
++ * Kit credits are paid items and never expire (no valid_until).
++ */
++final class BridgeOperationPayloads
++{
++    /**
++     * @return array<string, mixed>
++     */
++    public static function groupGrant(
++        string $uuid,
++        string $group,
++        ?string $expiresAt,
++        string $entitlementKey,
++        int $version,
++    ): array {
++        return [
++            'schema_version' => 1,
++            'type' => MinecraftOperationType::GroupGrant->value,
++            'uuid' => $uuid,
++            'group' => $group,
++            'expires_at' => $expiresAt,
++            'entitlement_key' => $entitlementKey,
++            'version' => $version,
++        ];
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public static function groupRevoke(
++        string $uuid,
++        string $group,
++        string $entitlementKey,
++        int $version,
++    ): array {
++        return [
++            'schema_version' => 1,
++            'type' => MinecraftOperationType::GroupRevoke->value,
++            'uuid' => $uuid,
++            'group' => $group,
++            'entitlement_key' => $entitlementKey,
++            'version' => $version,
++        ];
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    public static function kitCredit(string $uuid, string $kit, int $qty): array
++    {
++        return [
++            'schema_version' => 1,
++            'type' => MinecraftOperationType::KitCredit->value,
++            'uuid' => $uuid,
++            'kit' => $kit,
++            'qty' => $qty,
++        ];
++    }
++}
+diff --git a/plugins/shop/src/Services/BridgePackageDelivery.php b/plugins/shop/src/Services/BridgePackageDelivery.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Services/BridgePackageDelivery.php
+@@ -0,0 +1,193 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Services;
++
++use Azuriom\Models\User;
++use Azuriom\Plugin\Shop\Data\GroupGrantRequest;
++use Azuriom\Plugin\Shop\Data\GroupRevokeRequest;
++use Azuriom\Plugin\Shop\Data\KitCreditRequest;
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
++use Azuriom\Plugin\Shop\Models\Package;
++use Azuriom\Plugin\Shop\Models\PaymentItem;
++use Azuriom\Plugin\Shop\Support\ConfiguredDeliveryServers;
++use Illuminate\Support\Collection;
++use Illuminate\Support\Facades\Log;
++use Illuminate\Support\Str;
++
++/**
++ * Turns package command groups with mode=bridge into shop_minecraft_operations.
++ * Console-command groups are left to Package::dispatchCommands.
++ */
++class BridgePackageDelivery
++{
++    public function __construct(private MinecraftOperationDispatcher $dispatcher)
++    {
++    }
++
++    /**
++     * @param  Collection<int, array<string, mixed>>  $groups
++     */
++    public function dispatch(Package $package, PaymentItem $item, string $trigger, Collection $groups): void
++    {
++        $user = $item->payment?->user;
++        $index = 0;
++
++        foreach ($groups as $group) {
++            $serverId = (int) ($group['server'] ?? 0);
++            $actions = $group['actions'] ?? [];
++            if ($serverId < 1 || ! is_array($actions)) {
++                $index++;
++
++                continue;
++            }
++
++            if (! ConfiguredDeliveryServers::allows($serverId)) {
++                Log::info('[shop] bridge skip package group: server '.$serverId.' not in shop.configured_delivery.servers');
++                $index++;
++
++                continue;
++            }
++
++            foreach ($actions as $action) {
++                if (! is_array($action) || empty($action['op'])) {
++                    $index++;
++
++                    continue;
++                }
++                $this->dispatchAction($package, $item, $user, $serverId, $trigger, $action, $index);
++                $index++;
++            }
++        }
++    }
++
++    /**
++     * @param  array<string, mixed>  $action
++     */
++    private function dispatchAction(
++        Package $package,
++        PaymentItem $item,
++        ?User $user,
++        int $serverId,
++        string $trigger,
++        array $action,
++        int $index,
++    ): void {
++        $operationKey = 'pkg:'.$item->id.':'.$index;
++        $op = (string) $action['op'];
++        $uuid = $this->playerUuid($user);
++
++        if ($uuid === null) {
++            $type = $op === 'add_kit_credits'
++                ? MinecraftOperationType::KitCredit
++                : ($this->isRevokeTrigger($trigger) ? MinecraftOperationType::GroupRevoke : MinecraftOperationType::GroupGrant);
++            $this->dispatcher->failNoUuid($type, $operationKey, $serverId, [
++                'schema_version' => 1,
++                'type' => $type->value,
++                'reason' => 'failed:no_uuid',
++                'package_id' => $package->id,
++                'payment_item_id' => $item->id,
++            ]);
++
++            return;
++        }
++
++        if ($op === 'add_kit_credits') {
++            $kit = $this->replaceTokens((string) ($action['kit'] ?? ''), $package, $item);
++            $qty = BridgeExpiry::resolveQty($package, $item, (string) ($action['qty'] ?? '{quantity}'));
++            $this->dispatcher->creditKit(new KitCreditRequest(
++                $operationKey,
++                $serverId,
++                $uuid,
++                $kit,
++                $qty,
++                paymentItemId: $item->id,
++            ));
++
++            return;
++        }
++
++        if ($op !== 'grant_group') {
++            Log::warning('[shop] bridge unknown action '.$op.' item='.$item->id);
++
++            return;
++        }
++
++        $group = self::normalizeGroup($this->replaceTokens((string) ($action['group'] ?? '{rank_name}'), $package, $item));
++        if ($group === null) {
++            Log::warning('[shop] bridge invalid group for item='.$item->id);
++
++            return;
++        }
++
++        $entitlementKey = $group;
++        $version = $this->dispatcher->nextGrantVersion($uuid, $entitlementKey);
++
++        if ($this->isRevokeTrigger($trigger)) {
++            $this->dispatcher->revokeGroup(new GroupRevokeRequest(
++                $operationKey,
++                $serverId,
++                $uuid,
++                $group,
++                $entitlementKey,
++                $version,
++                paymentItemId: $item->id,
++            ));
++
++            return;
++        }
++
++        $months = BridgeExpiry::resolveMonths($package, $item, (string) ($action['duration'] ?? 'package'));
++        $expires = BridgeExpiry::absoluteEnd(BridgeExpiry::currentEnd($user, $package), $months);
++
++        $this->dispatcher->grantGroup(new GroupGrantRequest(
++            $operationKey,
++            $serverId,
++            $uuid,
++            $group,
++            $expires->toAtomString(),
++            $entitlementKey,
++            $version,
++            paymentItemId: $item->id,
++        ));
++    }
++
++    private function isRevokeTrigger(string $trigger): bool
++    {
++        return in_array($trigger, ['expiration', 'refund', 'chargeback', 'revoke'], true);
++    }
++
++    private function playerUuid(?User $user): ?string
++    {
++        $raw = strtolower(str_replace('-', '', (string) $user?->game_id));
++        if (! preg_match('/^[0-9a-f]{32}$/', $raw)) {
++            return null;
++        }
++
++        return substr($raw, 0, 8).'-'.substr($raw, 8, 4).'-'.substr($raw, 12, 4).'-'.substr($raw, 16, 4).'-'.substr($raw, 20);
++    }
++
++    private function replaceTokens(string $value, Package $package, PaymentItem $item): string
++    {
++        $replaced = str_replace([
++            '{quantity}', '{package_id}', '{package_name}', '{price}', '{transaction_id}', '{rank_name}',
++        ], [
++            $item->quantity, $package->id, Str::slug((string) $package->name) ?: 'package-'.$package->id,
++            $item->price, $item->payment?->transaction_id, Str::slug((string) $package->name) ?: 'package',
++        ], $value);
++
++        return method_exists($item, 'replaceVariables') ? $item->replaceVariables($replaced) : $replaced;
++    }
++
++    public static function normalizeGroup(string $group): ?string
++    {
++        $normalized = strtolower(trim($group));
++        if ($normalized === '' || strlen($normalized) > 36) {
++            return null;
++        }
++        if (! preg_match('/^[a-z0-9._-]+$/', $normalized)) {
++            return null;
++        }
++
++        return $normalized;
++    }
++}
+diff --git a/plugins/shop/src/Data/GroupGrantRequest.php b/plugins/shop/src/Data/GroupGrantRequest.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Data/GroupGrantRequest.php
+@@ -0,0 +1,19 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Data;
++
++readonly class GroupGrantRequest
++{
++    public function __construct(
++        public string $operationKey,
++        public int $serverId,
++        public string $playerUuid,
++        public string $group,
++        public ?string $expiresAt,
++        public string $entitlementKey,
++        public int $version,
++        public ?int $purchaseId = null,
++        public ?int $paymentItemId = null,
++    ) {
++    }
++}
+diff --git a/plugins/shop/src/Data/GroupRevokeRequest.php b/plugins/shop/src/Data/GroupRevokeRequest.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Data/GroupRevokeRequest.php
+@@ -0,0 +1,18 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Data;
++
++readonly class GroupRevokeRequest
++{
++    public function __construct(
++        public string $operationKey,
++        public int $serverId,
++        public string $playerUuid,
++        public string $group,
++        public string $entitlementKey,
++        public int $version,
++        public ?int $purchaseId = null,
++        public ?int $paymentItemId = null,
++    ) {
++    }
++}
+diff --git a/plugins/shop/src/Data/KitCreditRequest.php b/plugins/shop/src/Data/KitCreditRequest.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Data/KitCreditRequest.php
+@@ -0,0 +1,17 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Data;
++
++readonly class KitCreditRequest
++{
++    public function __construct(
++        public string $operationKey,
++        public int $serverId,
++        public string $playerUuid,
++        public string $kit,
++        public int $qty,
++        public ?int $purchaseId = null,
++        public ?int $paymentItemId = null,
++    ) {
++    }
++}
+diff --git a/plugins/shop/src/Commands/BridgeDeliveryCheckCommand.php b/plugins/shop/src/Commands/BridgeDeliveryCheckCommand.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/src/Commands/BridgeDeliveryCheckCommand.php
+@@ -0,0 +1,87 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Commands;
++
++use Azuriom\Models\Server;
++use Azuriom\Plugin\Shop\Models\Package;
++use Azuriom\Plugin\Shop\Services\BridgeExpiry;
++use Azuriom\Plugin\Shop\Services\ConfiguredDeliveryService;
++use Azuriom\Plugin\Shop\Support\ConfiguredDeliveryServers;
++use Illuminate\Console\Command;
++use Illuminate\Support\Facades\Route;
++use Illuminate\Support\Facades\Schema;
++
++/**
++ * Read-only dry-run of the bridge-delivery site patch. Does not write.
++ *
++ *   php artisan shop:bridge-delivery-check
++ */
++class BridgeDeliveryCheckCommand extends Command
++{
++    protected $signature = 'shop:bridge-delivery-check';
++
++    protected $description = 'Dry-run check of shop privilege/kit bridge delivery (no writes)';
++
++    public function handle(): int
++    {
++        $ok = true;
++
++        $this->line('[info] shop.configured_delivery.enabled = '.(ConfiguredDeliveryService::enabled() ? '1' : '0'));
++        $raw = ConfiguredDeliveryServers::raw();
++        $ids = ConfiguredDeliveryServers::ids();
++        $this->line('[info] shop.configured_delivery.servers = '.($raw === '' ? '(empty — nobody)' : $raw));
++
++        if ($ids === []) {
++            $this->line('[WARN] no servers listed; tick() and dispatcher will no-op');
++        }
++
++        foreach ($ids as $id) {
++            $server = Server::query()->find($id);
++            $this->line(($server ? '[ok]  ' : '[MISS] ').'server #'.$id.($server ? ' '.$server->name : ''));
++            $ok = $ok && $server !== null;
++        }
++
++        foreach (['shop_minecraft_operations', 'shop_subscriptions'] as $table) {
++            $exists = Schema::hasTable($table);
++            $this->line(($exists ? '[ok]  ' : '[MISS] ').'table '.$table);
++            $ok = $ok && ($table === 'shop_subscriptions' || $exists);
++        }
++        $this->line((Schema::hasTable('user_package_states') ? '[ok]  ' : '[info] ').'table user_package_states'
++            .(Schema::hasTable('user_package_states') ? '' : ' (optional)'));
++
++        $routes = [
++            'shop.admin.deliveries.index' => Route::has('shop.admin.deliveries.index'),
++            'shop.admin.deliveries.retry' => Route::has('shop.admin.deliveries.retry'),
++            'shop.admin.deliveries.mark' => Route::has('shop.admin.deliveries.mark'),
++        ];
++        foreach ($routes as $name => $present) {
++            $this->line(($present ? '[ok]  ' : '[MISS] ').'route '.$name);
++            $ok = $ok && $present;
++        }
++
++        $bridgeGroups = 0;
++        $packages = Package::query()->get(['id', 'name', 'commands', 'billing_period']);
++        foreach ($packages as $package) {
++            foreach ((array) $package->commands as $group) {
++                if (! is_array($group) || ($group['mode'] ?? '') !== 'bridge') {
++                    continue;
++                }
++                $bridgeGroups++;
++                $serverId = (int) ($group['server'] ?? 0);
++                $listed = ConfiguredDeliveryServers::allows($serverId);
++                $this->line(($listed ? '[ok]  ' : '[WARN] ').'package #'.$package->id.' '.$package->name
++                    .' bridge server='.$serverId
++                    .($listed ? '' : ' not in configured_delivery.servers (will skip)')
++                    .' months='.BridgeExpiry::monthsFromPackage($package));
++            }
++        }
++        $this->line('[info] bridge command groups: '.$bridgeGroups);
++
++        $this->line('[info] cointcore required API: KitCreditService.addCredits(UUID, String, int) — kit credits never expire');
++        $this->line('[info] group_grant expires_at is absolute ISO-8601; kit_credit has no valid_until');
++
++        $this->info($ok ? 'bridge-delivery check passed' : 'bridge-delivery check found problems');
++
++        return $ok ? self::SUCCESS : self::FAILURE;
++    }
++}
+diff --git a/plugins/shop/database/migrations/2026_10_11_100000_add_configured_delivery_servers.php b/plugins/shop/database/migrations/2026_10_11_100000_add_configured_delivery_servers.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/database/migrations/2026_10_11_100000_add_configured_delivery_servers.php
+@@ -0,0 +1,19 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Support\Facades\DB;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        if (! DB::table('settings')->where('name', 'shop.configured_delivery.servers')->exists()) {
++            DB::table('settings')->insert(['name' => 'shop.configured_delivery.servers', 'value' => '']);
++        }
++    }
++
++    public function down(): void
++    {
++        DB::table('settings')->where('name', 'shop.configured_delivery.servers')->delete();
++    }
++};
+diff --git a/plugins/shop/resources/views/admin/packages/_bridge_commands.blade.php b/plugins/shop/resources/views/admin/packages/_bridge_commands.blade.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/resources/views/admin/packages/_bridge_commands.blade.php
+@@ -0,0 +1,110 @@
++<div class="card mb-3" id="bridge-delivery-editor">
++    <div class="card-header">Доставка через мост (AzLink)</div>
++    <div class="card-body">
++        <p class="small text-muted mb-3">
++            Группы с <code>mode=bridge</code> создают операции <code>group_grant</code> / <code>kit_credit</code>
++            вместо консольных команд. Киты не имеют срока. Привилегии истекают: max(текущий конец, сейчас) + N календарных месяцев.
++            Сервер должен быть в <code>shop.configured_delivery.servers</code>.
++        </p>
++        <div id="bridgeGroups"></div>
++        <button type="button" class="btn btn-outline-primary btn-sm" id="bridgeAddGroup">Добавить bridge-группу</button>
++    </div>
++</div>
++
++@php
++    $bridgeServers = [];
++    foreach ($servers ?? [] as $id => $name) {
++        if (is_object($name)) {
++            $bridgeServers[$name->id ?? $id] = $name->name ?? (string) $name;
++        } else {
++            $bridgeServers[$id] = $name;
++        }
++    }
++@endphp
++@push('footer-scripts')
++<script>
++(function () {
++    const servers = @json($bridgeServers);
++    const existing = @json(old('commands', $package->commands ?? $commands ?? []));
++    const triggers = ['purchase', 'renewal', 'expiration', 'refund', 'chargeback'];
++    const root = document.getElementById('bridgeGroups');
++    let next = 1000;
++
++    function serverOptions(selected) {
++        return Object.entries(servers).map(([id, name]) =>
++            `<option value="${id}" ${String(id) === String(selected) ? 'selected' : ''}>${name}</option>`
++        ).join('');
++    }
++
++    function actionRow(prefix, action) {
++        const op = action.op || 'grant_group';
++        return `<div class="border rounded p-2 mb-2 bridge-action">
++            <div class="row g-2">
++                <div class="col-md-3">
++                    <label class="form-label">op</label>
++                    <select name="${prefix}[op]" class="form-select form-select-sm bridge-op">
++                        <option value="grant_group" ${op === 'grant_group' ? 'selected' : ''}>grant_group</option>
++                        <option value="add_kit_credits" ${op === 'add_kit_credits' ? 'selected' : ''}>add_kit_credits</option>
++                    </select>
++                </div>
++                <div class="col-md-3 bridge-group-fields">
++                    <label class="form-label">group</label>
++                    <input class="form-control form-control-sm" name="${prefix}[group]" value="${action.group || '{rank_name}'}">
++                </div>
++                <div class="col-md-3 bridge-group-fields">
++                    <label class="form-label">duration</label>
++                    <input class="form-control form-control-sm" name="${prefix}[duration]" value="${action.duration || 'package'}">
++                </div>
++                <div class="col-md-3 bridge-kit-fields">
++                    <label class="form-label">kit</label>
++                    <input class="form-control form-control-sm" name="${prefix}[kit]" value="${action.kit || ''}">
++                </div>
++                <div class="col-md-3 bridge-kit-fields">
++                    <label class="form-label">qty</label>
++                    <input class="form-control form-control-sm" name="${prefix}[qty]" value="${action.qty || '{quantity}'}">
++                </div>
++            </div>
++        </div>`;
++    }
++
++    function toggleFields(card) {
++        card.querySelectorAll('.bridge-action').forEach((row) => {
++            const op = row.querySelector('.bridge-op')?.value;
++            row.querySelectorAll('.bridge-group-fields').forEach((el) => el.style.display = op === 'grant_group' ? '' : 'none');
++            row.querySelectorAll('.bridge-kit-fields').forEach((el) => el.style.display = op === 'add_kit_credits' ? '' : 'none');
++        });
++    }
++
++    function addGroup(data) {
++        const i = next++;
++        const card = document.createElement('div');
++        card.className = 'border rounded p-3 mb-3';
++        card.innerHTML = `
++            <input type="hidden" name="commands[${i}][mode]" value="bridge">
++            <input type="hidden" name="commands[${i}][require_online]" value="0">
++            <div class="row g-2 mb-2">
++                <div class="col-md-3">
++                    <label class="form-label">trigger</label>
++                    <select name="commands[${i}][trigger]" class="form-select form-select-sm">
++                        ${triggers.map((t) => `<option value="${t}" ${data.trigger === t ? 'selected' : ''}>${t}</option>`).join('')}
++                    </select>
++                </div>
++                <div class="col-md-4">
++                    <label class="form-label">server</label>
++                    <select name="commands[${i}][server]" class="form-select form-select-sm">${serverOptions(data.server)}</select>
++                </div>
++            </div>
++            <div class="bridge-actions">${(data.actions || [{op: 'grant_group'}]).map((action, j) => actionRow(`commands[${i}][actions][${j}]`, action)).join('')}</div>
++            <button type="button" class="btn btn-sm btn-outline-danger bridge-remove">Удалить группу</button>
++        `;
++        root.appendChild(card);
++        toggleFields(card);
++        card.querySelectorAll('.bridge-op').forEach((el) => el.addEventListener('change', () => toggleFields(card)));
++        card.querySelector('.bridge-remove').addEventListener('click', () => card.remove());
++    }
++
++    (Array.isArray(existing) ? existing : []).filter((g) => g && g.mode === 'bridge').forEach(addGroup);
++    document.getElementById('bridgeAddGroup')?.addEventListener('click', () => addGroup({trigger: 'purchase', actions: [{op: 'grant_group'}]}));
++})();
++</script>
++@endpush
+diff --git a/plugins/shop/tests/Unit/BridgeDeliveryTest.php b/plugins/shop/tests/Unit/BridgeDeliveryTest.php
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/plugins/shop/tests/Unit/BridgeDeliveryTest.php
+@@ -0,0 +1,73 @@
++<?php
++
++namespace Azuriom\Plugin\Shop\Tests\Unit;
++
++use Azuriom\Plugin\Shop\Enums\MinecraftOperationType;
++use Azuriom\Plugin\Shop\Services\BridgeExpiry;
++use Azuriom\Plugin\Shop\Services\BridgeOperationPayloads;
++use Azuriom\Plugin\Shop\Services\BridgePackageDelivery;
++use Azuriom\Plugin\Shop\Support\ConfiguredDeliveryServers;
++use Illuminate\Support\Carbon;
++use PHPUnit\Framework\TestCase;
++
++class BridgeDeliveryTest extends TestCase
++{
++    public function test_server_csv_parses_unique_ids(): void
++    {
++        $this->assertSame([9, 12], ConfiguredDeliveryServers::ids('9, 12,9'));
++        $this->assertSame([], ConfiguredDeliveryServers::ids(''));
++        $this->assertTrue(ConfiguredDeliveryServers::allows(9, '9,12'));
++        $this->assertFalse(ConfiguredDeliveryServers::allows(3, '9,12'));
++        $this->assertFalse(ConfiguredDeliveryServers::allows(9, ''));
++    }
++
++    public function test_expiry_is_max_current_end_plus_calendar_months(): void
++    {
++        Carbon::setTestNow('2026-10-11 12:00:00');
++        $end = BridgeExpiry::absoluteEnd(Carbon::parse('2026-09-01 00:00:00'), 2);
++        $this->assertSame('2026-12-11 12:00:00', $end->format('Y-m-d H:i:s'));
++
++        $later = BridgeExpiry::absoluteEnd(Carbon::parse('2027-01-15 00:00:00'), 1);
++        $this->assertSame('2027-02-15 00:00:00', $later->format('Y-m-d H:i:s'));
++        Carbon::setTestNow();
++    }
++
++    public function test_group_grant_payload_has_absolute_expiry(): void
++    {
++        $payload = BridgeOperationPayloads::groupGrant(
++            '11111111-1111-1111-1111-111111111111',
++            'vip',
++            '2027-01-01T00:00:00+00:00',
++            'vip',
++            3,
++        );
++
++        $this->assertSame(MinecraftOperationType::GroupGrant->value, $payload['type']);
++        $this->assertSame('vip', $payload['group']);
++        $this->assertSame('2027-01-01T00:00:00+00:00', $payload['expires_at']);
++        $this->assertSame(3, $payload['version']);
++        $this->assertArrayNotHasKey('valid_until', $payload);
++    }
++
++    public function test_kit_credit_payload_has_no_valid_until(): void
++    {
++        $payload = BridgeOperationPayloads::kitCredit(
++            '11111111-1111-1111-1111-111111111111',
++            'starter',
++            2,
++        );
++
++        $this->assertSame(MinecraftOperationType::KitCredit->value, $payload['type']);
++        $this->assertSame('starter', $payload['kit']);
++        $this->assertSame(2, $payload['qty']);
++        $this->assertArrayNotHasKey('valid_until', $payload);
++        $this->assertArrayNotHasKey('expires_at', $payload);
++    }
++
++    public function test_group_name_normalization(): void
++    {
++        $this->assertSame('vip', BridgePackageDelivery::normalizeGroup('VIP'));
++        $this->assertNull(BridgePackageDelivery::normalizeGroup('bad group'));
++        $this->assertNull(BridgePackageDelivery::normalizeGroup(''));
++    }
++}

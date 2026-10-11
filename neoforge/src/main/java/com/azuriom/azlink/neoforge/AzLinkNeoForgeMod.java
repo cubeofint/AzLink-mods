@@ -94,6 +94,11 @@ public final class AzLinkNeoForgeMod implements AzLinkPlatform {
             this.plugin.installKitRedeemHandler(
                     new com.azuriom.azlink.neoforge.kits.CointCoreKitRedeemHandler(() -> this.server));
         }
+        if (net.neoforged.fml.ModList.get().isLoaded("cointcore")
+                && com.azuriom.azlink.neoforge.kits.CointCoreKitCreditHandler.isAvailable()) {
+            this.plugin.installKitCreditHandler(
+                    new com.azuriom.azlink.neoforge.kits.CointCoreKitCreditHandler());
+        }
     }
 
     @SubscribeEvent

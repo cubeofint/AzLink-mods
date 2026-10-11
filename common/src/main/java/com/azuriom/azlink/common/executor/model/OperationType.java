@@ -6,7 +6,10 @@ package com.azuriom.azlink.common.executor.model;
 public enum OperationType {
     PRIVILEGE_RECONCILE("privilege_reconcile"),
     PRIVILEGE_REVOKE("privilege_revoke"),
-    KIT_REDEEM("kit_redeem");
+    KIT_REDEEM("kit_redeem"),
+    GROUP_GRANT("group_grant"),
+    GROUP_REVOKE("group_revoke"),
+    KIT_CREDIT("kit_credit");
 
     private final String wire;
 

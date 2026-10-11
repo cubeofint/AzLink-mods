@@ -22,7 +22,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Last successfully applied entitlement version per player UUID (local server identity).
+ * Last successfully applied entitlement version per player, plus the exact
+ * LuckPerms nodes written for each entitlement key (group, meta, expiry).
  */
 public class EntitlementVersionLedger {
 
@@ -53,6 +54,9 @@ public class EntitlementVersionLedger {
             }
             for (VersionEntry entry : loaded) {
                 if (entry != null && entry.playerUuid != null) {
+                    if (entry.grants == null) {
+                        entry.grants = new ArrayList<GrantRecord>();
+                    }
                     this.byPlayer.put(entry.playerUuid, entry);
                 }
             }
@@ -65,11 +69,70 @@ public class EntitlementVersionLedger {
     }
 
     public synchronized void putAppliedVersion(UUID playerUuid, long version) throws IOException {
-        VersionEntry entry = new VersionEntry();
-        entry.playerUuid = playerUuid.toString();
+        VersionEntry entry = playerEntry(playerUuid);
         entry.version = version;
         entry.updatedAt = Instant.now();
-        this.byPlayer.put(entry.playerUuid, entry);
+        flush();
+    }
+
+    public synchronized Optional<GrantedNodes> getGrant(UUID playerUuid, String entitlementKey) {
+        if (playerUuid == null || isBlank(entitlementKey)) {
+            return Optional.empty();
+        }
+        VersionEntry entry = this.byPlayer.get(playerUuid.toString());
+        if (entry == null || entry.grants == null) {
+            return Optional.empty();
+        }
+        GrantRecord record = findGrant(entry, entitlementKey);
+        return record == null ? Optional.<GrantedNodes>empty() : Optional.of(toGranted(record));
+    }
+
+    public synchronized Optional<Long> getGrantVersion(UUID playerUuid, String entitlementKey) {
+        Optional<GrantedNodes> grant = getGrant(playerUuid, entitlementKey);
+        return grant.isPresent() ? Optional.of(grant.get().getVersion()) : Optional.<Long>empty();
+    }
+
+    public synchronized void putGrant(UUID playerUuid, GrantedNodes grant) throws IOException {
+        if (playerUuid == null || grant == null || isBlank(grant.getEntitlementKey())) {
+            throw new IllegalArgumentException("grant requires player and entitlement_key");
+        }
+        VersionEntry entry = playerEntry(playerUuid);
+        if (entry.grants == null) {
+            entry.grants = new ArrayList<GrantRecord>();
+        }
+        GrantRecord record = findGrant(entry, grant.getEntitlementKey());
+        if (record == null) {
+            record = new GrantRecord();
+            record.entitlementKey = grant.getEntitlementKey();
+            entry.grants.add(record);
+        }
+        record.version = grant.getVersion();
+        record.group = grant.getGroup();
+        record.meta = new ArrayList<String>(grant.getMeta());
+        record.permissions = new ArrayList<String>(grant.getPermissions());
+        record.expiresAt = grant.getExpiresAt();
+        record.updatedAt = grant.getUpdatedAt() != null ? grant.getUpdatedAt() : Instant.now();
+        if (grant.getVersion() > entry.version) {
+            entry.version = grant.getVersion();
+        }
+        entry.updatedAt = Instant.now();
+        flush();
+    }
+
+    public synchronized void removeGrant(UUID playerUuid, String entitlementKey) throws IOException {
+        if (playerUuid == null || isBlank(entitlementKey)) {
+            return;
+        }
+        VersionEntry entry = this.byPlayer.get(playerUuid.toString());
+        if (entry == null || entry.grants == null) {
+            return;
+        }
+        GrantRecord record = findGrant(entry, entitlementKey);
+        if (record == null) {
+            return;
+        }
+        entry.grants.remove(record);
+        entry.updatedAt = Instant.now();
         flush();
     }
 
@@ -98,10 +161,64 @@ public class EntitlementVersionLedger {
         return new EntitlementVersionLedger(dataDirectory.resolve("semantic-entitlement-versions.json"));
     }
 
+    private VersionEntry playerEntry(UUID playerUuid) {
+        String key = playerUuid.toString();
+        VersionEntry entry = this.byPlayer.get(key);
+        if (entry == null) {
+            entry = new VersionEntry();
+            entry.playerUuid = key;
+            entry.grants = new ArrayList<GrantRecord>();
+            this.byPlayer.put(key, entry);
+        }
+        if (entry.grants == null) {
+            entry.grants = new ArrayList<GrantRecord>();
+        }
+        return entry;
+    }
+
+    private static GrantRecord findGrant(VersionEntry entry, String entitlementKey) {
+        for (GrantRecord record : entry.grants) {
+            if (record != null && entitlementKey.equals(record.entitlementKey)) {
+                return record;
+            }
+        }
+        return null;
+    }
+
+    private static GrantedNodes toGranted(GrantRecord record) {
+        return new GrantedNodes(
+                record.entitlementKey,
+                record.version,
+                record.group,
+                record.meta,
+                record.permissions,
+                record.expiresAt,
+                record.updatedAt
+        );
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
     private static final class VersionEntry {
         @SerializedName("player_uuid")
         String playerUuid;
         long version;
+        @SerializedName("updated_at")
+        Instant updatedAt;
+        List<GrantRecord> grants;
+    }
+
+    private static final class GrantRecord {
+        @SerializedName("entitlement_key")
+        String entitlementKey;
+        long version;
+        String group;
+        List<String> meta;
+        List<String> permissions;
+        @SerializedName("expires_at")
+        Instant expiresAt;
         @SerializedName("updated_at")
         Instant updatedAt;
     }
