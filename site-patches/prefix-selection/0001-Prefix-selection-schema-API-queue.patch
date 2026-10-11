@@ -1,0 +1,1528 @@
+From: mawleesys <alsoalberdo@gmail.com>
+Subject: [PATCH] Prefix selection: schema, AzLink API, queue, check, tests
+
+prefix_catalog / user_server_prefixes / prefix_operations, report+lease+ack,
+artisan prefixes:check, Feature tests. Flag prefixes.enabled default off.
+
+---
+diff --git a/database/migrations/2026_10_11_000000_create_prefix_selection_tables.php b/database/migrations/2026_10_11_000000_create_prefix_selection_tables.php
+new file mode 100644
+index 0000000..f7fc4cf
+--- /dev/null
++++ b/database/migrations/2026_10_11_000000_create_prefix_selection_tables.php
+@@ -0,0 +1,82 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        if (! Schema::hasTable('prefix_catalog')) {
++            Schema::create('prefix_catalog', function (Blueprint $table) {
++                $table->id();
++                $table->string('group', 64)->unique();
++                $table->string('display_name', 120);
++                $table->string('prefix_raw', 255)->nullable();
++                $table->string('category', 16)->default('other'); // quest|donate|staff|other
++                $table->unsignedInteger('sort')->default(0);
++                $table->boolean('enabled')->default(true);
++                $table->timestamps();
++            });
++        }
++
++        if (! Schema::hasTable('user_server_prefixes')) {
++            Schema::create('user_server_prefixes', function (Blueprint $table) {
++                $table->id();
++                $table->unsignedInteger('user_id');
++                $table->unsignedInteger('server_id');
++                $table->json('available')->nullable();
++                $table->string('selected', 64)->nullable();
++                $table->boolean('locked_staff')->default(false);
++                $table->timestamp('synced_at')->nullable();
++                $table->timestamps();
++
++                $table->unique(['user_id', 'server_id']);
++                $table->index(['server_id', 'updated_at']);
++                $table->foreign('user_id')->references('id')->on('users')->cascadeOnDelete();
++                $table->foreign('server_id')->references('id')->on('servers')->cascadeOnDelete();
++            });
++        }
++
++        if (! Schema::hasTable('prefix_operations')) {
++            Schema::create('prefix_operations', function (Blueprint $table) {
++                $table->string('id', 40)->primary();
++                $table->unsignedInteger('user_id');
++                $table->unsignedInteger('server_id');
++                $table->string('type', 32)->default('prefix_select');
++                $table->string('group', 64)->nullable();
++                $table->string('status', 16)->default('pending'); // pending|applied|rejected
++                $table->unsignedInteger('deliveries')->default(0);
++                $table->timestamp('leased_until')->nullable();
++                $table->string('reason', 191)->nullable();
++                $table->string('selected', 64)->nullable();
++                $table->string('source', 32)->nullable();
++                $table->timestamp('applied_at')->nullable();
++                $table->timestamps();
++
++                $table->index(['server_id', 'status', 'leased_until', 'created_at']);
++                $table->index(['user_id', 'server_id', 'status']);
++                $table->foreign('user_id')->references('id')->on('users')->cascadeOnDelete();
++                $table->foreign('server_id')->references('id')->on('servers')->cascadeOnDelete();
++            });
++        }
++
++        if (! DB::table('settings')->where('name', 'prefixes.enabled')->exists()) {
++            DB::table('settings')->insert(['name' => 'prefixes.enabled', 'value' => '0']);
++        }
++
++        if (! DB::table('settings')->where('name', 'prefixes.lease_seconds')->exists()) {
++            DB::table('settings')->insert(['name' => 'prefixes.lease_seconds', 'value' => '30']);
++        }
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('prefix_operations');
++        Schema::dropIfExists('user_server_prefixes');
++        Schema::dropIfExists('prefix_catalog');
++        DB::table('settings')->whereIn('name', ['prefixes.enabled', 'prefixes.lease_seconds'])->delete();
++    }
++};
+diff --git a/app/Models/PrefixCatalog.php b/app/Models/PrefixCatalog.php
+new file mode 100644
+index 0000000..fd3fdc4
+--- /dev/null
++++ b/app/Models/PrefixCatalog.php
+@@ -0,0 +1,46 @@
++<?php
++
++namespace Azuriom\Models;
++
++use Illuminate\Database\Eloquent\Builder;
++use Illuminate\Database\Eloquent\Model;
++
++/**
++ * Admin-managed display metadata for a chat prefix group key.
++ *
++ * @property int $id
++ * @property string $group
++ * @property string $display_name
++ * @property string|null $prefix_raw
++ * @property string $category
++ * @property int $sort
++ * @property bool $enabled
++ */
++class PrefixCatalog extends Model
++{
++    public const CATEGORIES = ['quest', 'donate', 'staff', 'other'];
++
++    protected $table = 'prefix_catalog';
++
++    protected $fillable = [
++        'group', 'display_name', 'prefix_raw', 'category', 'sort', 'enabled',
++    ];
++
++    protected $casts = [
++        'sort' => 'integer',
++        'enabled' => 'boolean',
++    ];
++
++    public function scopeEnabled(Builder $query): Builder
++    {
++        return $query->where('enabled', true);
++    }
++
++    public static function categoryLabel(string $category): string
++    {
++        $key = 'prefixes.categories.'.$category;
++        $label = trans($key);
++
++        return $label === $key ? $category : $label;
++    }
++}
+diff --git a/app/Models/UserServerPrefix.php b/app/Models/UserServerPrefix.php
+new file mode 100644
+index 0000000..0bd4841
+--- /dev/null
++++ b/app/Models/UserServerPrefix.php
+@@ -0,0 +1,40 @@
++<?php
++
++namespace Azuriom\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++/**
++ * Per-(user, server) prefix snapshot reported by the game.
++ *
++ * @property int $id
++ * @property int $user_id
++ * @property int $server_id
++ * @property array<int, array{group: string, prefix_raw?: string, category?: string}>|null $available
++ * @property string|null $selected
++ * @property bool $locked_staff
++ * @property \Carbon\Carbon|null $synced_at
++ */
++class UserServerPrefix extends Model
++{
++    protected $fillable = [
++        'user_id', 'server_id', 'available', 'selected', 'locked_staff', 'synced_at',
++    ];
++
++    protected $casts = [
++        'available' => 'array',
++        'locked_staff' => 'boolean',
++        'synced_at' => 'datetime',
++    ];
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function server(): BelongsTo
++    {
++        return $this->belongsTo(Server::class);
++    }
++}
+diff --git a/app/Models/PrefixOperation.php b/app/Models/PrefixOperation.php
+new file mode 100644
+index 0000000..1c7ca47
+--- /dev/null
++++ b/app/Models/PrefixOperation.php
+@@ -0,0 +1,71 @@
++<?php
++
++namespace Azuriom\Models;
++
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
++
++/**
++ * Site → game prefix change. Not the gluon queue.
++ *
++ * @property string $id
++ * @property int $user_id
++ * @property int $server_id
++ * @property string $type
++ * @property string|null $group
++ * @property string $status
++ * @property int $deliveries
++ * @property \Carbon\Carbon|null $leased_until
++ * @property string|null $reason
++ * @property string|null $selected
++ * @property string|null $source
++ * @property \Carbon\Carbon|null $applied_at
++ */
++class PrefixOperation extends Model
++{
++    public const TYPE_SELECT = 'prefix_select';
++
++    public const PENDING = 'pending';
++
++    public const APPLIED = 'applied';
++
++    public const REJECTED = 'rejected';
++
++    public $incrementing = false;
++
++    protected $keyType = 'string';
++
++    protected $fillable = [
++        'id', 'user_id', 'server_id', 'type', 'group', 'status', 'deliveries',
++        'leased_until', 'reason', 'selected', 'source', 'applied_at',
++    ];
++
++    protected $casts = [
++        'deliveries' => 'integer',
++        'leased_until' => 'datetime',
++        'applied_at' => 'datetime',
++    ];
++
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
++
++    public function server(): BelongsTo
++    {
++        return $this->belongsTo(Server::class);
++    }
++
++    public function isPending(): bool
++    {
++        return $this->status === self::PENDING;
++    }
++
++    public function statusLabel(): string
++    {
++        $key = 'prefixes.status.'.$this->status;
++        $label = trans($key);
++
++        return $label === $key ? $this->status : $label;
++    }
++}
+diff --git a/app/Services/Prefix/PrefixFormatter.php b/app/Services/Prefix/PrefixFormatter.php
+new file mode 100644
+index 0000000..410c30b
+--- /dev/null
++++ b/app/Services/Prefix/PrefixFormatter.php
+@@ -0,0 +1,264 @@
++<?php
++
++namespace Azuriom\Services\Prefix;
++
++/**
++ * Convert MiniMessage / legacy (& / §) prefix strings to escaped HTML for previews.
++ */
++class PrefixFormatter
++{
++    private const VANILLA = [
++        '0' => '#000000', '1' => '#0000AA', '2' => '#00AA00', '3' => '#00AAAA',
++        '4' => '#AA0000', '5' => '#AA00AA', '6' => '#FFAA00', '7' => '#AAAAAA',
++        '8' => '#555555', '9' => '#5555FF', 'a' => '#55FF55', 'b' => '#55FFFF',
++        'c' => '#FF5555', 'd' => '#FF55FF', 'e' => '#FFFF55', 'f' => '#FFFFFF',
++    ];
++
++    private const NAMED = [
++        'black' => '#000000', 'dark_blue' => '#0000AA', 'dark_green' => '#00AA00',
++        'dark_aqua' => '#00AAAA', 'dark_red' => '#AA0000', 'dark_purple' => '#AA00AA',
++        'gold' => '#FFAA00', 'gray' => '#AAAAAA', 'dark_gray' => '#555555',
++        'blue' => '#5555FF', 'green' => '#55FF55', 'aqua' => '#55FFFF',
++        'red' => '#FF5555', 'light_purple' => '#FF55FF', 'yellow' => '#FFFF55',
++        'white' => '#FFFFFF', 'grey' => '#AAAAAA',
++    ];
++
++    public function toHtml(?string $raw): string
++    {
++        if ($raw === null || $raw === '') {
++            return '';
++        }
++
++        $input = str_replace(["\r", "\n"], '', str_replace('§', '&', $raw));
++        $html = '';
++        $styles = [];
++        $offset = 0;
++        $length = strlen($input);
++
++        while ($offset < $length) {
++            if ($input[$offset] === '<' && preg_match('/<(\/)?([^>]+)>/A', $input, $match, 0, $offset) === 1) {
++                $this->applyMiniTag($styles, $match[1] === '/', trim($match[2]));
++                $offset += strlen($match[0]);
++
++                continue;
++            }
++
++            if ($input[$offset] === '&' && $offset + 1 < $length) {
++                $consumed = $this->applyLegacy($styles, $input, $offset);
++                if ($consumed > 0) {
++                    $offset += $consumed;
++
++                    continue;
++                }
++            }
++
++            if (preg_match('/./usA', $input, $char, 0, $offset) !== 1) {
++                break;
++            }
++
++            $html .= $this->wrap(htmlspecialchars($char[0], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'), $styles);
++            $offset += strlen($char[0]);
++        }
++
++        return $html;
++    }
++
++    /**
++     * @param  array<string, string|bool>  $styles
++     */
++    private function applyMiniTag(array &$styles, bool $closing, string $tag): void
++    {
++        $lower = strtolower($tag);
++
++        if ($closing) {
++            if ($lower === 'reset' || $lower === 'r') {
++                $styles = [];
++
++                return;
++            }
++
++            $name = explode(':', $lower, 2)[0];
++            if (in_array($name, ['color', 'colour', 'c', 'gradient', 'rainbow'], true) || isset(self::NAMED[$name])) {
++                unset($styles['color']);
++
++                return;
++            }
++
++            switch ($name) {
++                case 'bold':
++                case 'b':
++                    unset($styles['bold']);
++                    break;
++                case 'italic':
++                case 'i':
++                case 'em':
++                    unset($styles['italic']);
++                    break;
++                case 'underlined':
++                case 'u':
++                    unset($styles['underline']);
++                    break;
++                case 'strikethrough':
++                case 'st':
++                    unset($styles['strike']);
++                    break;
++                case 'obfuscated':
++                case 'obf':
++                    unset($styles['obfuscated']);
++                    break;
++            }
++
++            return;
++        }
++
++        if ($lower === 'reset' || $lower === 'r') {
++            $styles = [];
++
++            return;
++        }
++
++        if (isset(self::NAMED[$lower])) {
++            $styles['color'] = self::NAMED[$lower];
++
++            return;
++        }
++
++        if (preg_match('/^#([0-9a-f]{6})$/', $lower, $hex) === 1) {
++            $styles['color'] = '#'.$hex[1];
++
++            return;
++        }
++
++        if (preg_match('/^(?:color|colour|c):#?([0-9a-f]{6})$/', $lower, $hex) === 1) {
++            $styles['color'] = '#'.$hex[1];
++
++            return;
++        }
++
++        if (preg_match('/^gradient:([^>]+)$/', $lower, $grad) === 1) {
++            $first = explode(':', $grad[1])[0];
++            $styles['color'] = $this->resolveColorToken($first);
++
++            return;
++        }
++
++        match ($lower) {
++            'bold', 'b' => $styles['bold'] = true,
++            'italic', 'i', 'em' => $styles['italic'] = true,
++            'underlined', 'u' => $styles['underline'] = true,
++            'strikethrough', 'st' => $styles['strike'] = true,
++            'obfuscated', 'obf' => $styles['obfuscated'] = true,
++            default => null,
++        };
++    }
++
++    /**
++     * @param  array<string, string|bool>  $styles
++     */
++    private function applyLegacy(array &$styles, string $input, int $i): int
++    {
++        $next = $input[$i + 1];
++
++        if ($next === '#' && isset($input[$i + 7]) && preg_match('/^&#([0-9A-Fa-f]{6})/', substr($input, $i, 8), $hex) === 1) {
++            $styles['color'] = '#'.$hex[1];
++
++            return 8;
++        }
++
++        if (($next === 'x' || $next === 'X') && preg_match('/^&x(?:&([0-9A-Fa-f])){6}/', substr($input, $i, 14), $hex) === 1) {
++            $digits = preg_replace('/[^0-9A-Fa-f]/', '', substr($input, $i + 2, 12));
++            if (strlen($digits) === 6) {
++                $styles['color'] = '#'.$digits;
++
++                return 14;
++            }
++        }
++
++        $code = strtolower($next);
++
++        if (isset(self::VANILLA[$code])) {
++            $styles['color'] = self::VANILLA[$code];
++
++            return 2;
++        }
++
++        switch ($code) {
++            case 'l':
++                $styles['bold'] = true;
++
++                return 2;
++            case 'o':
++                $styles['italic'] = true;
++
++                return 2;
++            case 'n':
++                $styles['underline'] = true;
++
++                return 2;
++            case 'm':
++                $styles['strike'] = true;
++
++                return 2;
++            case 'k':
++                $styles['obfuscated'] = true;
++
++                return 2;
++            case 'r':
++                $styles = [];
++
++                return 2;
++            default:
++                return 0;
++        }
++    }
++
++    /**
++     * @param  array<string, string|bool>  $styles
++     */
++    private function wrap(string $escaped, array $styles): string
++    {
++        if ($styles === []) {
++            return $escaped;
++        }
++
++        $css = [];
++        if (isset($styles['color'])) {
++            $css[] = 'color:'.$styles['color'];
++        }
++        if (! empty($styles['bold'])) {
++            $css[] = 'font-weight:700';
++        }
++        if (! empty($styles['italic'])) {
++            $css[] = 'font-style:italic';
++        }
++
++        $decor = [];
++        if (! empty($styles['underline'])) {
++            $decor[] = 'underline';
++        }
++        if (! empty($styles['strike'])) {
++            $decor[] = 'line-through';
++        }
++        if ($decor !== []) {
++            $css[] = 'text-decoration:'.implode(' ', $decor);
++        }
++
++        $class = ! empty($styles['obfuscated']) ? ' class="prefix-obfuscated"' : '';
++        $style = $css !== [] ? ' style="'.implode(';', $css).'"' : '';
++
++        return '<span'.$class.$style.'>'.$escaped.'</span>';
++    }
++
++    private function resolveColorToken(string $token): string
++    {
++        $token = ltrim($token, '#');
++        if (isset(self::NAMED[$token])) {
++            return self::NAMED[$token];
++        }
++        if (preg_match('/^[0-9a-f]{6}$/', $token) === 1) {
++            return '#'.$token;
++        }
++
++        return '#FFFFFF';
++    }
++}
+diff --git a/app/Services/Prefix/PrefixPlayerLinker.php b/app/Services/Prefix/PrefixPlayerLinker.php
+new file mode 100644
+index 0000000..b125290
+--- /dev/null
++++ b/app/Services/Prefix/PrefixPlayerLinker.php
+@@ -0,0 +1,54 @@
++<?php
++
++namespace Azuriom\Services\Prefix;
++
++use Azuriom\Models\User;
++
++/**
++ * Resolve a site user the same way other AzLink endpoints do: game_id (dashed /
++ * undashed UUID), then exact player name.
++ */
++class PrefixPlayerLinker
++{
++    public function find(?string $uuid, ?string $name): ?User
++    {
++        $normalized = $this->normalizeUuid((string) $uuid);
++
++        if ($normalized !== null) {
++            $candidates = array_unique(array_filter([
++                $uuid,
++                $normalized,
++                str_replace('-', '', $normalized),
++            ]));
++
++            $user = User::query()->whereIn('game_id', $candidates)->first();
++            if ($user !== null) {
++                return $user;
++            }
++        }
++
++        if (filled($name)) {
++            return User::query()->where('name', $name)->first();
++        }
++
++        return null;
++    }
++
++    public function normalizeUuid(string $value): ?string
++    {
++        $hex = strtolower(preg_replace('/[^0-9a-f]/', '', $value) ?? '');
++
++        if (strlen($hex) !== 32) {
++            return null;
++        }
++
++        return sprintf(
++            '%s-%s-%s-%s-%s',
++            substr($hex, 0, 8),
++            substr($hex, 8, 4),
++            substr($hex, 12, 4),
++            substr($hex, 16, 4),
++            substr($hex, 20, 12)
++        );
++    }
++}
+diff --git a/app/Services/Prefix/PrefixReporter.php b/app/Services/Prefix/PrefixReporter.php
+new file mode 100644
+index 0000000..1d30bcb
+--- /dev/null
++++ b/app/Services/Prefix/PrefixReporter.php
+@@ -0,0 +1,92 @@
++<?php
++
++namespace Azuriom\Services\Prefix;
++
++use Azuriom\Models\UserServerPrefix;
++use Illuminate\Support\Carbon;
++
++/**
++ * Game → site snapshot. Last write wins per (user, server_id).
++ */
++class PrefixReporter
++{
++    public function __construct(private PrefixPlayerLinker $linker)
++    {
++    }
++
++    /**
++     * @param  array<int, array<string, mixed>>  $players
++     * @return array{stored: int, skipped: int}
++     */
++    public function report(int $serverId, array $players): array
++    {
++        $stored = 0;
++        $skipped = 0;
++        $now = Carbon::now();
++
++        foreach ($players as $player) {
++            $user = $this->linker->find(
++                isset($player['uuid']) ? (string) $player['uuid'] : null,
++                isset($player['name']) ? (string) $player['name'] : null
++            );
++
++            if ($user === null) {
++                $skipped++;
++
++                continue;
++            }
++
++            $available = $this->normalizeAvailable($player['available'] ?? []);
++            $selected = $player['selected'] ?? null;
++            $selected = is_string($selected) && $selected !== '' ? $selected : null;
++
++            UserServerPrefix::query()->updateOrCreate(
++                [
++                    'user_id' => $user->id,
++                    'server_id' => $serverId,
++                ],
++                [
++                    'available' => $available,
++                    'selected' => $selected,
++                    'locked_staff' => (bool) ($player['locked_staff'] ?? false),
++                    'synced_at' => $now,
++                ]
++            );
++
++            $stored++;
++        }
++
++        return ['stored' => $stored, 'skipped' => $skipped];
++    }
++
++    /**
++     * @param  mixed  $available
++     * @return list<array{group: string, prefix_raw: string, category: string}>
++     */
++    public function normalizeAvailable(mixed $available): array
++    {
++        if (! is_array($available)) {
++            return [];
++        }
++
++        $out = [];
++        foreach ($available as $item) {
++            if (! is_array($item) || ! filled($item['group'] ?? null)) {
++                continue;
++            }
++
++            $category = (string) ($item['category'] ?? 'other');
++            if (! in_array($category, ['quest', 'donate', 'staff', 'other'], true)) {
++                $category = 'other';
++            }
++
++            $out[] = [
++                'group' => substr((string) $item['group'], 0, 64),
++                'prefix_raw' => substr((string) ($item['prefix_raw'] ?? ''), 0, 255),
++                'category' => $category,
++            ];
++        }
++
++        return $out;
++    }
++}
+diff --git a/app/Services/Prefix/PrefixOperationQueue.php b/app/Services/Prefix/PrefixOperationQueue.php
+new file mode 100644
+index 0000000..72ed155
+--- /dev/null
++++ b/app/Services/Prefix/PrefixOperationQueue.php
+@@ -0,0 +1,155 @@
++<?php
++
++namespace Azuriom\Services\Prefix;
++
++use Azuriom\Models\PrefixOperation as Op;
++use Azuriom\Models\User;
++use Azuriom\Models\UserServerPrefix;
++use Illuminate\Support\Collection;
++use Illuminate\Support\Facades\DB;
++use Illuminate\Support\Str;
++use InvalidArgumentException;
++use RuntimeException;
++
++/**
++ * Site → game prefix_select queue. Separate from ServerOperationQueue (gluons).
++ *
++ * GET leases pending rows for this server until leased_until (default 30s).
++ * POST ack is idempotent: a final row is returned unchanged.
++ */
++class PrefixOperationQueue
++{
++    public const TYPE_SELECT = Op::TYPE_SELECT;
++
++    public function __construct(private PrefixPlayerLinker $linker)
++    {
++    }
++
++    public function enqueue(User $user, int $serverId, ?string $group, array $meta = [], ?string $id = null): Op
++    {
++        $id ??= (string) Str::uuid();
++
++        if ($existing = Op::query()->find($id)) {
++            return $existing;
++        }
++
++        $pending = Op::query()
++            ->where('user_id', $user->id)
++            ->where('server_id', $serverId)
++            ->where('status', Op::PENDING)
++            ->first();
++
++        if ($pending !== null) {
++            throw new RuntimeException('prefix_op_pending');
++        }
++
++        return Op::query()->create([
++            'id' => $id,
++            'user_id' => $user->id,
++            'server_id' => $serverId,
++            'type' => self::TYPE_SELECT,
++            'group' => $group,
++            'status' => Op::PENDING,
++            'source' => $meta['source'] ?? 'profile',
++        ]);
++    }
++
++    /**
++     * Pending prefix_select rows for one server. Marks a lease so another poll
++     * does not re-deliver until leased_until passes.
++     *
++     * @return Collection<int, array{op_id: string, type: string, uuid: string|null, group: string|null}>
++     */
++    public function pending(int $serverId, int $limit = 50): Collection
++    {
++        $limit = max(1, min($limit, 200));
++        $leaseSeconds = max(5, (int) setting('prefixes.lease_seconds', 30));
++        $leaseUntil = now()->addSeconds($leaseSeconds);
++
++        return DB::transaction(function () use ($serverId, $limit, $leaseUntil) {
++            $ops = Op::query()
++                ->with('user')
++                ->where('server_id', $serverId)
++                ->where('type', self::TYPE_SELECT)
++                ->where('status', Op::PENDING)
++                ->where(function ($query) {
++                    $query->whereNull('leased_until')
++                        ->orWhere('leased_until', '<=', now());
++                })
++                ->orderBy('created_at')
++                ->limit($limit)
++                ->lockForUpdate()
++                ->get();
++
++            if ($ops->isNotEmpty()) {
++                Op::query()->whereIn('id', $ops->modelKeys())->update([
++                    'leased_until' => $leaseUntil,
++                    'deliveries' => DB::raw('deliveries + 1'),
++                ]);
++            }
++
++            return $ops->map(fn (Op $op) => [
++                'op_id' => $op->id,
++                'type' => self::TYPE_SELECT,
++                'uuid' => $this->linker->normalizeUuid((string) ($op->user?->game_id ?? ''))
++                    ?? $op->user?->game_id,
++                'group' => $op->group,
++            ]);
++        });
++    }
++
++    /**
++     * Idempotent. status = applied | rejected.
++     */
++    public function ack(int $serverId, string $opId, string $status, ?string $reason, ?string $selected): ?Op
++    {
++        if (! in_array($status, [Op::APPLIED, Op::REJECTED], true)) {
++            throw new InvalidArgumentException('Unknown status.');
++        }
++
++        return DB::transaction(function () use ($serverId, $opId, $status, $reason, $selected) {
++            $op = Op::query()
++                ->whereKey($opId)
++                ->where('server_id', $serverId)
++                ->lockForUpdate()
++                ->first();
++
++            if ($op === null) {
++                return null;
++            }
++
++            if ($op->status !== Op::PENDING) {
++                return $op;
++            }
++
++            $finalSelected = $status === Op::APPLIED
++                ? ($selected !== null && $selected !== '' ? $selected : $op->group)
++                : $selected;
++
++            $op->forceFill([
++                'status' => $status,
++                'reason' => $reason !== null ? Str::limit($reason, 180) : null,
++                'selected' => $finalSelected !== null && $finalSelected !== '' ? $finalSelected : null,
++                'applied_at' => $status === Op::APPLIED ? now() : null,
++                'leased_until' => null,
++            ])->save();
++
++            if ($status === Op::APPLIED) {
++                $row = UserServerPrefix::query()
++                    ->where('user_id', $op->user_id)
++                    ->where('server_id', $serverId)
++                    ->lockForUpdate()
++                    ->first();
++
++                if ($row !== null) {
++                    $row->forceFill([
++                        'selected' => $op->selected,
++                        'synced_at' => now(),
++                    ])->save();
++                }
++            }
++
++            return $op;
++        });
++    }
++}
+diff --git a/app/Services/Prefix/PrefixSelection.php b/app/Services/Prefix/PrefixSelection.php
+new file mode 100644
+index 0000000..6c95450
+--- /dev/null
++++ b/app/Services/Prefix/PrefixSelection.php
+@@ -0,0 +1,167 @@
++<?php
++
++namespace Azuriom\Services\Prefix;
++
++use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixOperation;
++use Azuriom\Models\Server;
++use Azuriom\Models\User;
++use Azuriom\Models\UserServerPrefix;
++use Illuminate\Support\Collection;
++use RuntimeException;
++
++/**
++ * Cabinet / admin view-model and the rules for creating a prefix_select op.
++ */
++class PrefixSelection
++{
++    public function __construct(
++        private PrefixFormatter $formatter,
++        private PrefixOperationQueue $queue,
++    ) {
++    }
++
++    public static function enabled(): bool
++    {
++        return (bool) setting('prefixes.enabled', false);
++    }
++
++    /**
++     * @return Collection<int, array<string, mixed>>
++     */
++    public function cabinetServers(User $user): Collection
++    {
++        $rows = UserServerPrefix::query()
++            ->where('user_id', $user->id)
++            ->with('server:id,name,type,position')
++            ->get()
++            ->keyBy('server_id');
++
++        $serverIds = $rows->keys();
++        $azlinkIds = Server::query()
++            ->where('type', 'mc-azlink')
++            ->orderBy('position')
++            ->orderBy('name')
++            ->pluck('id');
++
++        $ids = $azlinkIds->merge($serverIds)->unique()->values();
++        $servers = Server::query()
++            ->whereIn('id', $ids)
++            ->orderBy('position')
++            ->orderBy('name')
++            ->get();
++
++        $catalog = PrefixCatalog::query()->get()->keyBy('group');
++        $pending = PrefixOperation::query()
++            ->where('user_id', $user->id)
++            ->where('status', PrefixOperation::PENDING)
++            ->get()
++            ->keyBy('server_id');
++        $latest = PrefixOperation::query()
++            ->where('user_id', $user->id)
++            ->orderByDesc('created_at')
++            ->get()
++            ->unique('server_id')
++            ->keyBy('server_id');
++
++        return $servers->map(function (Server $server) use ($rows, $catalog, $pending, $latest) {
++            $row = $rows->get($server->id);
++
++            return [
++                'server' => $server,
++                'row' => $row,
++                'locked_staff' => (bool) ($row?->locked_staff),
++                'selected' => $row?->selected,
++                'options' => $row === null ? collect() : $this->visibleOptions($row, $catalog),
++                'pending' => $pending->get($server->id),
++                'latest' => $latest->get($server->id),
++                'synced_at' => $row?->synced_at,
++            ];
++        });
++    }
++
++    /**
++     * @param  Collection<string, PrefixCatalog>  $catalog
++     * @return Collection<int, array<string, mixed>>
++     */
++    public function visibleOptions(UserServerPrefix $row, Collection $catalog): Collection
++    {
++        $options = collect();
++
++        foreach ($row->available ?? [] as $item) {
++            $group = (string) ($item['group'] ?? '');
++            if ($group === '') {
++                continue;
++            }
++
++            $entry = $catalog->get($group);
++            if ($entry !== null && ! $entry->enabled) {
++                continue;
++            }
++
++            $raw = $entry?->prefix_raw ?: (string) ($item['prefix_raw'] ?? '');
++            $category = $entry?->category ?: (string) ($item['category'] ?? 'other');
++
++            $options->push([
++                'group' => $group,
++                'display_name' => $entry?->display_name ?: $group,
++                'prefix_raw' => $raw,
++                'preview' => $this->formatter->toHtml($raw),
++                'category' => $category,
++                'category_label' => PrefixCatalog::categoryLabel($category),
++                'sort' => $entry?->sort ?? 1000,
++                'in_catalog' => $entry !== null,
++            ]);
++        }
++
++        return $options->sortBy([
++            ['sort', 'asc'],
++            ['display_name', 'asc'],
++        ])->values();
++    }
++
++    public function select(User $user, int $serverId, ?string $group, string $source = 'profile'): PrefixOperation
++    {
++        $row = UserServerPrefix::query()
++            ->where('user_id', $user->id)
++            ->where('server_id', $serverId)
++            ->first();
++
++        if ($row === null) {
++            throw new RuntimeException('prefix_not_synced');
++        }
++
++        if ($source !== 'admin_reset' && $row->locked_staff) {
++            throw new RuntimeException('prefix_staff_locked');
++        }
++
++        if ($group !== null && $group !== '') {
++            $available = collect($row->available ?? [])->pluck('group')->filter()->all();
++            if (! in_array($group, $available, true)) {
++                throw new RuntimeException('prefix_not_available');
++            }
++
++            $catalog = PrefixCatalog::query()->where('group', $group)->first();
++            if ($catalog !== null && ! $catalog->enabled) {
++                throw new RuntimeException('prefix_disabled');
++            }
++        } else {
++            $group = null;
++        }
++
++        if ($row->selected === $group && ! PrefixOperation::query()
++            ->where('user_id', $user->id)
++            ->where('server_id', $serverId)
++            ->where('status', PrefixOperation::PENDING)
++            ->exists()) {
++            throw new RuntimeException('prefix_already_selected');
++        }
++
++        return $this->queue->enqueue($user, $serverId, $group, ['source' => $source]);
++    }
++
++    public function preview(?string $raw): string
++    {
++        return $this->formatter->toHtml($raw);
++    }
++}
+diff --git a/app/Http/Controllers/Api/PrefixController.php b/app/Http/Controllers/Api/PrefixController.php
+new file mode 100644
+index 0000000..4220d0a
+--- /dev/null
++++ b/app/Http/Controllers/Api/PrefixController.php
+@@ -0,0 +1,79 @@
++<?php
++
++namespace Azuriom\Http\Controllers\Api;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Services\Prefix\PrefixOperationQueue;
++use Azuriom\Services\Prefix\PrefixReporter;
++use Azuriom\Services\Prefix\PrefixSelection;
++use Illuminate\Http\Request;
++
++/**
++ * AzLink prefix sync. Disabled unless setting prefixes.enabled = 1.
++ *
++ * POST /api/azlink/prefixes/report
++ * GET  /api/azlink/prefixes/operations
++ * POST /api/azlink/prefixes/ack
++ */
++class PrefixController extends Controller
++{
++    public function report(Request $request, PrefixReporter $reporter)
++    {
++        abort_unless(PrefixSelection::enabled(), 404);
++
++        $data = $this->validate($request, [
++            'players' => ['required', 'array', 'max:200'],
++            'players.*.uuid' => ['required', 'string', 'max:36'],
++            'players.*.name' => ['nullable', 'string', 'max:64'],
++            'players.*.available' => ['nullable', 'array', 'max:64'],
++            'players.*.available.*.group' => ['required_with:players.*.available', 'string', 'max:64'],
++            'players.*.available.*.prefix_raw' => ['nullable', 'string', 'max:255'],
++            'players.*.available.*.category' => ['nullable', 'string', 'max:16'],
++            'players.*.selected' => ['nullable', 'string', 'max:64'],
++            'players.*.locked_staff' => ['nullable', 'boolean'],
++        ]);
++
++        $result = $reporter->report((int) $request->input('server-id'), $data['players']);
++
++        return response()->json($result);
++    }
++
++    public function operations(Request $request, PrefixOperationQueue $queue)
++    {
++        abort_unless(PrefixSelection::enabled(), 404);
++
++        return response()->json([
++            'operations' => $queue->pending((int) $request->input('server-id'), (int) $request->query('limit', 50))->values(),
++        ]);
++    }
++
++    public function ack(Request $request, PrefixOperationQueue $queue)
++    {
++        abort_unless(PrefixSelection::enabled(), 404);
++
++        $data = $this->validate($request, [
++            'op_id' => ['required', 'string', 'max:40'],
++            'status' => ['required', 'in:applied,rejected'],
++            'reason' => ['nullable', 'string', 'max:500'],
++            'selected' => ['nullable', 'string', 'max:64'],
++        ]);
++
++        $op = $queue->ack(
++            (int) $request->input('server-id'),
++            $data['op_id'],
++            $data['status'],
++            $data['reason'] ?? null,
++            $data['selected'] ?? null
++        );
++
++        if ($op === null) {
++            return response()->json(['message' => 'not_found'], 404);
++        }
++
++        return response()->json([
++            'op_id' => $op->id,
++            'status' => $op->status,
++            'selected' => $op->selected,
++        ]);
++    }
++}
+diff --git a/app/Http/Controllers/ProfilePrefixController.php b/app/Http/Controllers/ProfilePrefixController.php
+new file mode 100644
+index 0000000..23a124e
+--- /dev/null
++++ b/app/Http/Controllers/ProfilePrefixController.php
+@@ -0,0 +1,46 @@
++<?php
++
++namespace Azuriom\Http\Controllers;
++
++use Azuriom\Services\Prefix\PrefixSelection;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Validation\Rule;
++use RuntimeException;
++
++class ProfilePrefixController extends Controller
++{
++    public function select(Request $request, PrefixSelection $selection): RedirectResponse
++    {
++        abort_unless(PrefixSelection::enabled(), 404);
++
++        $data = $this->validate($request, [
++            'server_id' => ['required', 'integer', Rule::exists('servers', 'id')],
++            'group' => ['nullable', 'string', 'max:64'],
++        ]);
++
++        $group = filled($data['group'] ?? null) ? (string) $data['group'] : null;
++
++        try {
++            $selection->select($request->user(), (int) $data['server_id'], $group, 'profile');
++        } catch (RuntimeException $e) {
++            $message = match ($e->getMessage()) {
++                'prefix_staff_locked' => trans('prefixes.cabinet.staff_locked'),
++                'prefix_not_synced' => trans('prefixes.cabinet.not_synced'),
++                'prefix_not_available' => trans('prefixes.cabinet.not_available'),
++                'prefix_disabled' => trans('prefixes.cabinet.disabled'),
++                'prefix_already_selected' => trans('prefixes.cabinet.already_selected'),
++                'prefix_op_pending' => trans('prefixes.cabinet.pending'),
++                default => trans('prefixes.cabinet.failed'),
++            };
++
++            return to_route('profile.index')
++                ->with('error', $message)
++                ->withFragment('prefixes-tab');
++        }
++
++        return to_route('profile.index')
++            ->with('success', trans('prefixes.cabinet.queued'))
++            ->withFragment('prefixes-tab');
++    }
++}
+diff --git a/app/Console/Commands/PrefixCheckCommand.php b/app/Console/Commands/PrefixCheckCommand.php
+new file mode 100644
+index 0000000..b593fea
+--- /dev/null
++++ b/app/Console/Commands/PrefixCheckCommand.php
+@@ -0,0 +1,100 @@
++<?php
++
++namespace Azuriom\Console\Commands;
++
++use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixOperation;
++use Azuriom\Models\UserServerPrefix;
++use Azuriom\Services\Prefix\PrefixFormatter;
++use Azuriom\Services\Prefix\PrefixSelection;
++use Illuminate\Console\Command;
++use Illuminate\Support\Facades\Route;
++use Illuminate\Support\Facades\Schema;
++
++/**
++ * Read-only dry-run: schema, flag, routes, formatter samples. Does not write.
++ *
++ *   php artisan prefixes:check
++ */
++class PrefixCheckCommand extends Command
++{
++    protected $signature = 'prefixes:check';
++
++    protected $description = 'Dry-run check of the prefix-selection site patch (no writes)';
++
++    public function handle(PrefixFormatter $formatter): int
++    {
++        $ok = true;
++
++        $tables = ['prefix_catalog', 'user_server_prefixes', 'prefix_operations'];
++        foreach ($tables as $table) {
++            $exists = Schema::hasTable($table);
++            $this->line(($exists ? '[ok]  ' : '[MISS] ').'table '.$table);
++            $ok = $ok && $exists;
++        }
++
++        $enabled = PrefixSelection::enabled();
++        $this->line('[info] prefixes.enabled = '.($enabled ? '1' : '0').' (endpoints 404 while off)');
++        $this->line('[info] prefixes.lease_seconds = '.(setting('prefixes.lease_seconds', 30)));
++
++        $routes = [
++            'azlink prefixes report' => $this->findPath('prefixes/report'),
++            'azlink prefixes operations' => $this->findPath('prefixes/operations'),
++            'azlink prefixes ack' => $this->findPath('prefixes/ack'),
++            'profile.prefixes.select' => Route::has('profile.prefixes.select'),
++            'admin.prefixes.index' => Route::has('admin.prefixes.index'),
++            'admin.prefixes.operations' => Route::has('admin.prefixes.operations'),
++        ];
++
++        foreach ($routes as $label => $present) {
++            $this->line(($present ? '[ok]  ' : '[MISS] ').'route '.$label);
++            $ok = $ok && (bool) $present;
++        }
++
++        if (! Route::has('profile.prefixes.select')) {
++            $this->warn('Add App\\Providers\\PrefixSelectionServiceProvider::class to bootstrap/providers.php,');
++            $this->warn('or keep the POST /api/profile/prefixes/select route from the api.php hunk.');
++        }
++
++        $samples = [
++            '&a[VIP] &fNick' => 'legacy',
++            '<gold>[VIP]</gold> <white>Nick' => 'minimessage',
++            '&#FFAA00[Hex]' => 'legacy-hex',
++        ];
++        foreach ($samples as $raw => $kind) {
++            $html = $formatter->toHtml($raw);
++            $this->line('[preview:'.$kind.'] '.$raw.' → '.$html);
++            if ($html === '' || str_contains($html, '<script')) {
++                $this->error('formatter produced empty or unsafe HTML for '.$kind);
++                $ok = false;
++            }
++        }
++
++        if ($ok && Schema::hasTable('prefix_catalog')) {
++            $this->line('[info] catalog rows: '.PrefixCatalog::query()->count());
++            $this->line('[info] user_server_prefixes rows: '.UserServerPrefix::query()->count());
++            $this->line('[info] prefix_operations rows: '.PrefixOperation::query()->count());
++        }
++
++        if (! $ok) {
++            $this->error('prefixes:check found problems (see MISS lines). No data was written.');
++
++            return self::FAILURE;
++        }
++
++        $this->info('prefixes:check passed (read-only).');
++
++        return self::SUCCESS;
++    }
++
++    private function findPath(string $needle): bool
++    {
++        foreach (Route::getRoutes() as $route) {
++            if (str_contains($route->uri(), $needle)) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++}
+diff --git a/tests/Feature/PrefixSelectionTest.php b/tests/Feature/PrefixSelectionTest.php
+new file mode 100644
+index 0000000..21729d8
+--- /dev/null
++++ b/tests/Feature/PrefixSelectionTest.php
+@@ -0,0 +1,226 @@
++<?php
++
++namespace Tests\Feature;
++
++use Azuriom\Models\PrefixCatalog;
++use Azuriom\Models\PrefixOperation as Op;
++use Azuriom\Models\Server;
++use Azuriom\Models\Setting;
++use Azuriom\Models\User;
++use Azuriom\Models\UserServerPrefix;
++use Azuriom\Services\Prefix\PrefixFormatter;
++use Azuriom\Services\Prefix\PrefixOperationQueue;
++use Azuriom\Services\Prefix\PrefixReporter;
++use Azuriom\Services\Prefix\PrefixSelection;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use RuntimeException;
++use Tests\TestCase;
++
++/**
++ * Requires a booted Azuriom app (phpunit.xml + sqlite).
++ *
++ *   cd /var/www/main-site
++ *   php artisan test --filter=PrefixSelectionTest
++ */
++class PrefixSelectionTest extends TestCase
++{
++    use RefreshDatabase;
++
++    private User $user;
++
++    private Server $server;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        $this->user = User::factory()->create([
++            'name' => 'Nick',
++            'game_id' => 'f3fc162dd34432fa8c9a0b987b0791cf',
++        ]);
++        $this->server = Server::query()->create([
++            'name' => 'ATM10-Test',
++            'address' => '127.0.0.1',
++            'type' => 'mc-azlink',
++            'port' => 25565,
++            'data' => [],
++        ]);
++
++        Setting::updateSettings(['prefixes.enabled' => '1', 'prefixes.lease_seconds' => '30']);
++    }
++
++    public function test_report_upserts_by_uuid_and_name(): void
++    {
++        $reporter = app(PrefixReporter::class);
++
++        $first = $reporter->report($this->server->id, [[
++            'uuid' => 'f3fc162d-d344-32fa-8c9a-0b987b0791cf',
++            'name' => 'Nick',
++            'available' => [
++                ['group' => 'vip', 'prefix_raw' => '<gold>[VIP]</gold>', 'category' => 'donate'],
++                ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'other'],
++            ],
++            'selected' => 'vip',
++            'locked_staff' => false,
++        ]]);
++
++        $this->assertSame(1, $first['stored']);
++        $this->assertSame(0, $first['skipped']);
++
++        $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
++        $this->assertSame('vip', $row->selected);
++        $this->assertCount(2, $row->available);
++
++        $byName = User::factory()->create(['name' => 'OnlyName', 'game_id' => null]);
++        $second = $reporter->report($this->server->id, [[
++            'uuid' => '00000000-0000-0000-0000-000000000099',
++            'name' => 'OnlyName',
++            'available' => [],
++            'selected' => null,
++            'locked_staff' => true,
++        ]]);
++        $this->assertSame(1, $second['stored']);
++        $this->assertTrue(UserServerPrefix::query()->where('user_id', $byName->id)->first()->locked_staff);
++    }
++
++    public function test_unknown_player_is_skipped(): void
++    {
++        $result = app(PrefixReporter::class)->report($this->server->id, [[
++            'uuid' => 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
++            'name' => 'Missing',
++            'available' => [],
++            'selected' => null,
++            'locked_staff' => false,
++        ]]);
++
++        $this->assertSame(0, $result['stored']);
++        $this->assertSame(1, $result['skipped']);
++    }
++
++    public function test_select_creates_prefix_select_operation(): void
++    {
++        $this->seedSnapshot();
++
++        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
++
++        $this->assertSame(Op::TYPE_SELECT, $op->type);
++        $this->assertSame('vip', $op->group);
++        $this->assertSame(Op::PENDING, $op->status);
++        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++    }
++
++    public function test_staff_locked_blocks_profile_select(): void
++    {
++        $this->seedSnapshot(locked: true);
++
++        $this->expectException(RuntimeException::class);
++        $this->expectExceptionMessage('prefix_staff_locked');
++        app(PrefixSelection::class)->select($this->user, $this->server->id, 'vip', 'profile');
++    }
++
++    public function test_disabled_catalog_entry_hidden_and_not_selectable(): void
++    {
++        $this->seedSnapshot();
++        PrefixCatalog::query()->create([
++            'group' => 'hidden',
++            'display_name' => 'Hidden',
++            'prefix_raw' => '&8[X]',
++            'category' => 'other',
++            'sort' => 1,
++            'enabled' => false,
++        ]);
++        PrefixCatalog::query()->create([
++            'group' => 'vip',
++            'display_name' => 'VIP',
++            'prefix_raw' => '<gold>[VIP]</gold>',
++            'category' => 'donate',
++            'sort' => 0,
++            'enabled' => true,
++        ]);
++
++        $row = UserServerPrefix::query()->where('user_id', $this->user->id)->first();
++        $options = app(PrefixSelection::class)->visibleOptions($row, PrefixCatalog::query()->get()->keyBy('group'));
++        $this->assertTrue($options->contains('group', 'vip'));
++        $this->assertFalse($options->contains('group', 'hidden'));
++
++        $this->expectException(RuntimeException::class);
++        $this->expectExceptionMessage('prefix_disabled');
++        app(PrefixSelection::class)->select($this->user, $this->server->id, 'hidden', 'profile');
++    }
++
++    public function test_pending_lease_and_idempotent_ack(): void
++    {
++        $this->seedSnapshot();
++        $queue = app(PrefixOperationQueue::class);
++        $op = $queue->enqueue($this->user, $this->server->id, 'vip', ['source' => 'profile']);
++
++        $first = $queue->pending($this->server->id, 50);
++        $this->assertCount(1, $first);
++        $this->assertSame($op->id, $first[0]['op_id']);
++        $this->assertSame('prefix_select', $first[0]['type']);
++        $this->assertSame('vip', $first[0]['group']);
++
++        $leased = $queue->pending($this->server->id, 50);
++        $this->assertCount(0, $leased);
++
++        $ack = $queue->ack($this->server->id, $op->id, Op::APPLIED, null, 'vip');
++        $this->assertSame(Op::APPLIED, $ack->status);
++        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++
++        $again = $queue->ack($this->server->id, $op->id, Op::REJECTED, 'ignored', null);
++        $this->assertSame(Op::APPLIED, $again->status);
++        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++    }
++
++    public function test_ack_rejected_keeps_previous_selection(): void
++    {
++        $this->seedSnapshot();
++        $queue = app(PrefixOperationQueue::class);
++        $op = $queue->enqueue($this->user, $this->server->id, null, ['source' => 'admin_reset']);
++        $queue->ack($this->server->id, $op->id, Op::REJECTED, 'staff_locked', 'vip');
++
++        $this->assertSame('vip', UserServerPrefix::query()->where('user_id', $this->user->id)->value('selected'));
++        $this->assertSame(Op::REJECTED, $op->fresh()->status);
++    }
++
++    public function test_formatter_legacy_and_minimessage(): void
++    {
++        $formatter = new PrefixFormatter();
++
++        $legacy = $formatter->toHtml('&a[VIP]');
++        $this->assertStringContainsString('#55FF55', $legacy);
++        $this->assertStringContainsString('[VIP]', $legacy);
++        $this->assertStringNotContainsString('&a', $legacy);
++
++        $mini = $formatter->toHtml('<gold>[VIP]</gold>');
++        $this->assertStringContainsString('#FFAA00', $mini);
++        $this->assertStringContainsString('[VIP]', $mini);
++
++        $escaped = $formatter->toHtml('<red>a<script>alert(1)</script>b</red>');
++        $this->assertStringNotContainsString('<script>', $escaped);
++        $this->assertStringContainsString('alert(1)', $escaped);
++    }
++
++    public function test_auto_select_enqueues_null_group(): void
++    {
++        $this->seedSnapshot();
++        $op = app(PrefixSelection::class)->select($this->user, $this->server->id, null, 'profile');
++        $this->assertNull($op->group);
++        $this->assertSame(Op::TYPE_SELECT, $op->type);
++    }
++
++    private function seedSnapshot(bool $locked = false): void
++    {
++        UserServerPrefix::query()->create([
++            'user_id' => $this->user->id,
++            'server_id' => $this->server->id,
++            'available' => [
++                ['group' => 'vip', 'prefix_raw' => '<gold>[VIP]</gold>', 'category' => 'donate'],
++                ['group' => 'hidden', 'prefix_raw' => '&8[X]', 'category' => 'other'],
++            ],
++            'selected' => 'vip',
++            'locked_staff' => $locked,
++            'synced_at' => now(),
++        ]);
++    }
++}
+diff --git a/routes/api.php b/routes/api.php
+index 7e2c1a0..b4f9d20 100755
+--- a/routes/api.php
++++ b/routes/api.php
+@@ -31,10 +31,16 @@ Route::prefix('/azlink')->middleware('server.token')->group(function () {
+     Route::get('/coins/operations', [\Azuriom\Http\Controllers\Api\ServerOperationController::class, 'index']);
+     Route::post('/coins/operations/{operation}/ack', [\Azuriom\Http\Controllers\Api\ServerOperationController::class, 'ack']);
+     Route::post('/coins/movements', [\Azuriom\Http\Controllers\Api\ServerMovementController::class, 'store']);
++    Route::post('/prefixes/report', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'report']);
++    Route::get('/prefixes/operations', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'operations']);
++    Route::post('/prefixes/ack', [\Azuriom\Http\Controllers\Api\PrefixController::class, 'ack']);
+     Route::post('/register', [ServerController::class, 'register']);
+     Route::post('/email', [ServerController::class, 'updateEmail']);
+     Route::post('/password', [ServerController::class, 'updatePassword']);
+ });
+ 
++Route::middleware(['web', 'auth'])->post('/profile/prefixes/select', [\Azuriom\Http\Controllers\ProfilePrefixController::class, 'select'])
++    ->name('profile.prefixes.select');
++
+ Route::get('/rss', [FeedController::class, 'rss'])->name('feeds.rss');
+ Route::get('/atom', [FeedController::class, 'atom'])->name('feeds.atom');

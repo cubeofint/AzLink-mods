@@ -1,0 +1,976 @@
+From: mawleesys <alsoalberdo@gmail.com>
+Subject: [PATCH] Prefix selection: cabinet tab, admin catalog/log/reset
+
+Личный кабинет «Префиксы», каталог CRUD, журнал операций, сброс у игрока.
+
+---
+diff --git a/app/Http/Controllers/Admin/PrefixCatalogController.php b/app/Http/Controllers/Admin/PrefixCatalogController.php
+new file mode 100644
+index 0000000..30de587
+--- /dev/null
++++ b/app/Http/Controllers/Admin/PrefixCatalogController.php
+@@ -0,0 +1,86 @@
++<?php
++
++namespace Azuriom\Http\Controllers\Admin;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Models\PrefixCatalog;
++use Azuriom\Services\Prefix\PrefixFormatter;
++use Azuriom\Services\Prefix\PrefixSelection;
++use Illuminate\Http\Request;
++use Illuminate\Validation\Rule;
++
++class PrefixCatalogController extends Controller
++{
++    public function index(PrefixFormatter $formatter)
++    {
++        $items = PrefixCatalog::query()->orderBy('sort')->orderBy('group')->get();
++
++        return view('admin.prefixes.index', [
++            'items' => $items,
++            'formatter' => $formatter,
++            'enabled' => PrefixSelection::enabled(),
++        ]);
++    }
++
++    public function create(PrefixFormatter $formatter)
++    {
++        return view('admin.prefixes.form', [
++            'item' => new PrefixCatalog(['enabled' => true, 'category' => 'other', 'sort' => 0]),
++            'formatter' => $formatter,
++        ]);
++    }
++
++    public function store(Request $request)
++    {
++        PrefixCatalog::query()->create($this->validated($request));
++
++        return to_route('admin.prefixes.index')
++            ->with('success', trans('prefixes.admin.catalog.created'));
++    }
++
++    public function edit(PrefixCatalog $prefix, PrefixFormatter $formatter)
++    {
++        return view('admin.prefixes.form', [
++            'item' => $prefix,
++            'formatter' => $formatter,
++        ]);
++    }
++
++    public function update(Request $request, PrefixCatalog $prefix)
++    {
++        $prefix->update($this->validated($request, $prefix));
++
++        return to_route('admin.prefixes.index')
++            ->with('success', trans('prefixes.admin.catalog.updated'));
++    }
++
++    public function destroy(PrefixCatalog $prefix)
++    {
++        $prefix->delete();
++
++        return to_route('admin.prefixes.index')
++            ->with('success', trans('prefixes.admin.catalog.deleted'));
++    }
++
++    /**
++     * @return array<string, mixed>
++     */
++    private function validated(Request $request, ?PrefixCatalog $item = null): array
++    {
++        $data = $this->validate($request, [
++            'group' => [
++                'required', 'string', 'max:64',
++                Rule::unique('prefix_catalog', 'group')->ignore($item),
++            ],
++            'display_name' => ['required', 'string', 'max:120'],
++            'prefix_raw' => ['nullable', 'string', 'max:255'],
++            'category' => ['required', Rule::in(PrefixCatalog::CATEGORIES)],
++            'sort' => ['required', 'integer', 'min:0', 'max:999999'],
++            'enabled' => ['nullable', 'boolean'],
++        ]);
++
++        $data['enabled'] = $request->boolean('enabled');
++
++        return $data;
++    }
++}
+diff --git a/app/Http/Controllers/Admin/PrefixOperationController.php b/app/Http/Controllers/Admin/PrefixOperationController.php
+new file mode 100644
+index 0000000..8befcd6
+--- /dev/null
++++ b/app/Http/Controllers/Admin/PrefixOperationController.php
+@@ -0,0 +1,42 @@
++<?php
++
++namespace Azuriom\Http\Controllers\Admin;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Models\PrefixOperation;
++use Azuriom\Models\Server;
++use Illuminate\Http\Request;
++
++class PrefixOperationController extends Controller
++{
++    public function index(Request $request)
++    {
++        $query = PrefixOperation::query()->with(['user:id,name,game_id', 'server:id,name']);
++
++        if ($request->filled('user_id')) {
++            $query->where('user_id', (int) $request->input('user_id'));
++        }
++
++        if ($request->filled('player')) {
++            $name = (string) $request->input('player');
++            $query->whereHas('user', fn ($q) => $q->where('name', 'like', '%'.$name.'%'));
++        }
++
++        if ($request->filled('server_id')) {
++            $query->where('server_id', (int) $request->input('server_id'));
++        }
++
++        if ($request->filled('status')) {
++            $query->where('status', (string) $request->input('status'));
++        }
++
++        return view('admin.prefixes.operations', [
++            'operations' => $query->orderByDesc('created_at')->paginate(40)->withQueryString(),
++            'servers' => Server::query()->orderBy('position')->orderBy('name')->get(['id', 'name']),
++            'userId' => $request->input('user_id'),
++            'player' => $request->input('player'),
++            'serverId' => $request->input('server_id'),
++            'status' => $request->input('status'),
++        ]);
++    }
++}
+diff --git a/app/Http/Controllers/Admin/PrefixUserController.php b/app/Http/Controllers/Admin/PrefixUserController.php
+new file mode 100644
+index 0000000..820e1f1
+--- /dev/null
++++ b/app/Http/Controllers/Admin/PrefixUserController.php
+@@ -0,0 +1,37 @@
++<?php
++
++namespace Azuriom\Http\Controllers\Admin;
++
++use Azuriom\Http\Controllers\Controller;
++use Azuriom\Models\Server;
++use Azuriom\Models\User;
++use Azuriom\Services\Prefix\PrefixSelection;
++use Illuminate\Http\RedirectResponse;
++use RuntimeException;
++
++class PrefixUserController extends Controller
++{
++    public function reset(User $user, Server $server, PrefixSelection $selection): RedirectResponse
++    {
++        abort_unless(PrefixSelection::enabled(), 404);
++
++        try {
++            $selection->select($user, $server->id, null, 'admin_reset');
++        } catch (RuntimeException $e) {
++            $message = match ($e->getMessage()) {
++                'prefix_not_synced' => trans('prefixes.admin.user.not_synced'),
++                'prefix_already_selected' => trans('prefixes.admin.user.already_auto'),
++                'prefix_op_pending' => trans('prefixes.admin.user.pending'),
++                default => trans('prefixes.admin.user.reset_failed'),
++            };
++
++            return redirect()
++                ->to(route('admin.users.edit', $user).'#user-prefixes')
++                ->with('error', $message);
++        }
++
++        return redirect()
++            ->to(route('admin.users.edit', $user).'#user-prefixes')
++            ->with('success', trans('prefixes.admin.user.reset_queued'));
++    }
++}
+diff --git a/app/Providers/PrefixSelectionServiceProvider.php b/app/Providers/PrefixSelectionServiceProvider.php
+new file mode 100644
+index 0000000..4dad854
+--- /dev/null
++++ b/app/Providers/PrefixSelectionServiceProvider.php
+@@ -0,0 +1,32 @@
++<?php
++
++namespace Azuriom\Providers;
++
++use Azuriom\Http\Controllers\ProfilePrefixController;
++use Illuminate\Support\Facades\Route;
++use Illuminate\Support\ServiceProvider;
++
++/**
++ * Registers the cabinet POST /user/prefixes/select route on the web stack.
++ * The same action is also wired in routes/api.php (auth+web) so the form works
++ * even if this provider is not listed in bootstrap/providers.php.
++ */
++class PrefixSelectionServiceProvider extends ServiceProvider
++{
++    public function boot(): void
++    {
++        if ($this->app->routesAreCached()) {
++            return;
++        }
++
++        Route::middleware(['web', 'auth'])
++            ->prefix('user')
++            ->name('profile.')
++            ->group(function () {
++                if (! Route::has('profile.prefixes.select')) {
++                    Route::post('/prefixes/select', [ProfilePrefixController::class, 'select'])
++                        ->name('prefixes.select');
++                }
++            });
++    }
++}
+diff --git a/resources/lang/ru/admin.php b/resources/lang/ru/admin.php
+index 05218c6..8866a40 100755
+--- a/resources/lang/ru/admin.php
++++ b/resources/lang/ru/admin.php
+@@ -37,6 +37,7 @@ return [
+             'bans' => 'Блокировки',
+             'hwids' => 'Одинаковые HWID',
+             'currency_transactions' => 'Движения валют',
++            'prefixes' => 'Префиксы',
+             'money_grants' => 'Начисление кварков',
+         ],
+ 
+diff --git a/resources/lang/ru/prefixes.php b/resources/lang/ru/prefixes.php
+new file mode 100644
+index 0000000..c7cb2c3
+--- /dev/null
++++ b/resources/lang/ru/prefixes.php
+@@ -0,0 +1,87 @@
++<?php
++
++return [
++    'categories' => [
++        'quest' => 'Квест',
++        'donate' => 'Донат',
++        'staff' => 'Стафф',
++        'other' => 'Другое',
++    ],
++
++    'status' => [
++        'pending' => 'ожидание',
++        'applied' => 'применено',
++        'rejected' => 'отклонено',
++    ],
++
++    'cabinet' => [
++        'title' => 'Префиксы',
++        'intro' => 'Выберите префикс для чата на каждом сервере. Список приходит из игры.',
++        'empty' => 'Пока нет данных с серверов. Зайдите в игру — доступные префиксы появятся после синхронизации.',
++        'server' => 'Сервер',
++        'current' => 'Текущий префикс',
++        'auto' => 'Авто',
++        'auto_hint' => 'Стандартный префикс сервера, без выбранной группы.',
++        'select' => 'Выбрать',
++        'selected' => 'Выбран',
++        'staff_locked' => 'Префикс стаффа нельзя изменить',
++        'not_synced' => 'Префиксы этого сервера ещё не синхронизированы.',
++        'not_available' => 'Этот префикс недоступен на сервере.',
++        'disabled' => 'Этот префикс скрыт в каталоге.',
++        'already_selected' => 'Этот префикс уже выбран.',
++        'pending' => 'Дождитесь применения предыдущего выбора.',
++        'failed' => 'Не удалось поставить выбор в очередь.',
++        'queued' => 'Выбор префикса отправлен на сервер.',
++        'synced_at' => 'Синхронизировано',
++        'last_op' => 'Последняя операция',
++        'no_preview' => 'нет превью',
++    ],
++
++    'admin' => [
++        'nav' => 'Префиксы',
++        'catalog' => [
++            'title' => 'Каталог префиксов',
++            'create' => 'Добавить префикс',
++            'edit' => 'Редактировать префикс',
++            'created' => 'Запись каталога создана.',
++            'updated' => 'Запись каталога сохранена.',
++            'deleted' => 'Запись каталога удалена.',
++            'group' => 'Ключ группы',
++            'display_name' => 'Название',
++            'prefix_raw' => 'Превью (MiniMessage / legacy)',
++            'category' => 'Категория',
++            'sort' => 'Порядок',
++            'enabled' => 'Показывать в кабинете',
++            'preview' => 'Превью',
++            'empty' => 'Каталог пуст.',
++            'flag_off' => 'Синхронизация выключена (настройка prefixes.enabled). Кабинет и AzLink-эндпоинты отвечают 404, пока флаг выключен.',
++        ],
++        'ops' => [
++            'title' => 'Журнал операций префиксов',
++            'op_id' => 'ID',
++            'user' => 'Игрок',
++            'server' => 'Сервер',
++            'group' => 'Группа',
++            'status' => 'Статус',
++            'reason' => 'Причина',
++            'selected' => 'Выбрано после ack',
++            'source' => 'Источник',
++            'created' => 'Создана',
++            'applied' => 'Завершена',
++        ],
++        'user' => [
++            'title' => 'Префиксы на серверах',
++            'empty' => 'Игра ещё не присылала префиксы этого игрока.',
++            'reset' => 'Сбросить на Авто',
++            'reset_confirm' => 'Поставить в очередь сброс префикса на Авто для этого сервера?',
++            'reset_queued' => 'Сброс префикса отправлен на сервер.',
++            'reset_failed' => 'Не удалось сбросить префикс.',
++            'not_synced' => 'Нет снимка префиксов для этого сервера.',
++            'already_auto' => 'Уже выбран Авто, очереди нет.',
++            'pending' => 'Уже есть незавершённая операция.',
++            'locked' => 'Префикс стаффа нельзя изменить',
++            'available' => 'Доступно',
++            'selected' => 'Выбрано',
++        ],
++    ],
++];
+diff --git a/resources/themes/coints/views/profile/_prefixes.blade.php b/resources/themes/coints/views/profile/_prefixes.blade.php
+new file mode 100644
+index 0000000..b8168e8
+--- /dev/null
++++ b/resources/themes/coints/views/profile/_prefixes.blade.php
+@@ -0,0 +1,151 @@
++@php
++    $prefixSelection = app(\Azuriom\Services\Prefix\PrefixSelection::class);
++    $prefixServers = $prefixSelection->cabinetServers(auth()->user());
++    $selectRoute = Route::has('profile.prefixes.select')
++        ? route('profile.prefixes.select')
++        : url('/api/profile/prefixes/select');
++@endphp
++
++<div class="profile-hub-card">
++    <div class="profile-hub-card-head">
++        <h2 class="profile-hub-card-title">
++            <i class="bi bi-chat-square-quote me-2"></i>{{ trans('prefixes.cabinet.title') }}
++        </h2>
++    </div>
++    <div class="profile-hub-card-body">
++        <p class="text-muted mb-3">{{ trans('prefixes.cabinet.intro') }}</p>
++
++        @if($prefixServers->isEmpty())
++            <p class="text-muted mb-0">{{ trans('prefixes.cabinet.empty') }}</p>
++        @else
++            <ul class="nav nav-pills profile-hub-tabs flex-wrap mb-3" role="tablist">
++                @foreach($prefixServers as $index => $block)
++                    <li class="nav-item" role="presentation">
++                        <button class="nav-link @if($index === 0) active @endif"
++                                id="prefix-server-tab-{{ $block['server']->id }}"
++                                data-bs-toggle="pill"
++                                data-bs-target="#prefix-server-{{ $block['server']->id }}"
++                                type="button"
++                                role="tab">
++                            {{ $block['server']->name }}
++                        </button>
++                    </li>
++                @endforeach
++            </ul>
++
++            <div class="tab-content">
++                @foreach($prefixServers as $index => $block)
++                    @php
++                        $row = $block['row'];
++                        $pending = $block['pending'];
++                        $latest = $block['latest'];
++                        $options = $block['options'];
++                    @endphp
++                    <div class="tab-pane fade @if($index === 0) show active @endif"
++                         id="prefix-server-{{ $block['server']->id }}"
++                         role="tabpanel">
++                        @if($row === null)
++                            <p class="text-muted mb-0">{{ trans('prefixes.cabinet.not_synced') }}</p>
++                        @else
++                            <p class="mb-2">
++                                <strong>{{ trans('prefixes.cabinet.current') }}:</strong>
++                                @if($block['selected'])
++                                    @php $current = $options->firstWhere('group', $block['selected']); @endphp
++                                    @if($current)
++                                        {!! $current['preview'] !!}
++                                        <span class="text-muted small">{{ $current['display_name'] }}</span>
++                                    @else
++                                        <code>{{ $block['selected'] }}</code>
++                                    @endif
++                                @else
++                                    {{ trans('prefixes.cabinet.auto') }}
++                                @endif
++                            </p>
++
++                            @if($block['locked_staff'])
++                                <div class="alert alert-warning py-2">{{ trans('prefixes.cabinet.staff_locked') }}</div>
++                            @endif
++
++                            @if($pending)
++                                <div class="alert alert-info py-2">
++                                    {{ trans('prefixes.status.pending') }}:
++                                    {{ $pending->group ?: trans('prefixes.cabinet.auto') }}
++                                </div>
++                            @elseif($latest && $latest->status !== 'pending')
++                                <p class="small text-muted">
++                                    {{ trans('prefixes.cabinet.last_op') }}:
++                                    {{ $latest->statusLabel() }}
++                                    @if($latest->reason)
++                                        — {{ $latest->reason }}
++                                    @endif
++                                </p>
++                            @endif
++
++                            <div class="table-responsive">
++                                <table class="table table-sm align-middle">
++                                    <tbody>
++                                    <tr>
++                                        <td>
++                                            <strong>{{ trans('prefixes.cabinet.auto') }}</strong>
++                                            <div class="small text-muted">{{ trans('prefixes.cabinet.auto_hint') }}</div>
++                                        </td>
++                                        <td class="text-end" style="width: 8rem">
++                                            @if($block['selected'] === null && ! $pending)
++                                                <span class="badge text-bg-success">{{ trans('prefixes.cabinet.selected') }}</span>
++                                            @elseif($block['locked_staff'])
++                                                <span class="text-muted small">{{ trans('prefixes.cabinet.staff_locked') }}</span>
++                                            @else
++                                                <form action="{{ $selectRoute }}" method="POST" class="d-inline">
++                                                    @csrf
++                                                    <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
++                                                    <input type="hidden" name="group" value="">
++                                                    <button type="submit" class="btn btn-sm home-server-play profile-hub-btn" @disabled($pending)>
++                                                        {{ trans('prefixes.cabinet.select') }}
++                                                    </button>
++                                                </form>
++                                            @endif
++                                        </td>
++                                    </tr>
++                                    @foreach($options as $option)
++                                        <tr>
++                                            <td>
++                                                <div class="prefix-preview">{!! $option['preview'] ?: '<span class="text-muted">'.e(trans('prefixes.cabinet.no_preview')).'</span>' !!}</div>
++                                                <div>
++                                                    <strong>{{ $option['display_name'] }}</strong>
++                                                    <span class="badge text-bg-secondary">{{ $option['category_label'] }}</span>
++                                                </div>
++                                            </td>
++                                            <td class="text-end">
++                                                @if($block['selected'] === $option['group'] && ! $pending)
++                                                    <span class="badge text-bg-success">{{ trans('prefixes.cabinet.selected') }}</span>
++                                                @elseif($block['locked_staff'])
++                                                    <span class="text-muted small">{{ trans('prefixes.cabinet.staff_locked') }}</span>
++                                                @else
++                                                    <form action="{{ $selectRoute }}" method="POST" class="d-inline">
++                                                        @csrf
++                                                        <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
++                                                        <input type="hidden" name="group" value="{{ $option['group'] }}">
++                                                        <button type="submit" class="btn btn-sm home-server-play profile-hub-btn" @disabled($pending)>
++                                                            {{ trans('prefixes.cabinet.select') }}
++                                                        </button>
++                                                    </form>
++                                                @endif
++                                            </td>
++                                        </tr>
++                                    @endforeach
++                                    </tbody>
++                                </table>
++                            </div>
++
++                            @if($block['synced_at'])
++                                <p class="small text-muted mb-0">
++                                    {{ trans('prefixes.cabinet.synced_at') }}: {{ format_date($block['synced_at'], true) }}
++                                </p>
++                            @endif
++                        @endif
++                    </div>
++                @endforeach
++            </div>
++        @endif
++    </div>
++</div>
+diff --git a/resources/themes/coints/views/profile/index.blade.php b/resources/themes/coints/views/profile/index.blade.php
+index 478dd76..a93c09b 100755
+--- a/resources/themes/coints/views/profile/index.blade.php
++++ b/resources/themes/coints/views/profile/index.blade.php
+@@ -184,6 +184,13 @@
+                                 </button>
+                             </li>
+                             @endif
++                            @if(\Azuriom\Services\Prefix\PrefixSelection::enabled())
++                            <li class="nav-item" role="presentation">
++                                <button class="nav-link" id="prefixes-tab" data-bs-toggle="pill" data-bs-target="#prefixes-content" type="button" role="tab">
++                                    <i class="bi bi-chat-square-quote me-2"></i>{{ trans('prefixes.cabinet.title') }}
++                                </button>
++                            </li>
++                            @endif
+                             <li class="nav-item" role="presentation">
+                                 <button class="nav-link" id="stats-tab" data-bs-toggle="pill" data-bs-target="#stats-content" type="button" role="tab">
+                                     <i class="bi bi-bar-chart-line me-2"></i>Статистика
+@@ -444,6 +451,12 @@
+                     </div>
+                     @endif
+ 
++                    @if(\Azuriom\Services\Prefix\PrefixSelection::enabled())
++                    <div class="tab-pane fade" id="prefixes-content" role="tabpanel">
++                        @include('profile._prefixes')
++                    </div>
++                    @endif
++
+                     <!-- Вкладка Безопасность -->
+                     <div class="tab-pane fade" id="security-content" role="tabpanel">
+                         <div class="profile-hub-card">
+diff --git a/resources/views/admin/prefixes/form.blade.php b/resources/views/admin/prefixes/form.blade.php
+new file mode 100644
+index 0000000..b9f4807
+--- /dev/null
++++ b/resources/views/admin/prefixes/form.blade.php
+@@ -0,0 +1,89 @@
++@extends('admin.layouts.admin')
++
++@section('title', $item->exists ? trans('prefixes.admin.catalog.edit') : trans('prefixes.admin.catalog.create'))
++
++@section('content')
++    <ul class="nav nav-tabs mb-3">
++        <li class="nav-item">
++            <a class="nav-link active" href="{{ route('admin.prefixes.index') }}">{{ trans('prefixes.admin.catalog.title') }}</a>
++        </li>
++        <li class="nav-item">
++            <a class="nav-link" href="{{ route('admin.prefixes.operations') }}">{{ trans('prefixes.admin.ops.title') }}</a>
++        </li>
++    </ul>
++
++    <div class="card shadow mb-4">
++        <div class="card-body">
++            <form method="POST"
++                  action="{{ $item->exists ? route('admin.prefixes.update', $item) : route('admin.prefixes.store') }}">
++                @csrf
++                @if($item->exists)
++                    @method('PUT')
++                @endif
++
++                <div class="mb-3">
++                    <label class="form-label" for="groupInput">{{ trans('prefixes.admin.catalog.group') }}</label>
++                    <input type="text" class="form-control @error('group') is-invalid @enderror" id="groupInput"
++                           name="group" value="{{ old('group', $item->group) }}" required maxlength="64">
++                    @error('group')
++                        <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                    @enderror
++                </div>
++
++                <div class="mb-3">
++                    <label class="form-label" for="nameInput">{{ trans('prefixes.admin.catalog.display_name') }}</label>
++                    <input type="text" class="form-control @error('display_name') is-invalid @enderror" id="nameInput"
++                           name="display_name" value="{{ old('display_name', $item->display_name) }}" required maxlength="120">
++                    @error('display_name')
++                        <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                    @enderror
++                </div>
++
++                <div class="mb-3">
++                    <label class="form-label" for="rawInput">{{ trans('prefixes.admin.catalog.prefix_raw') }}</label>
++                    <input type="text" class="form-control @error('prefix_raw') is-invalid @enderror" id="rawInput"
++                           name="prefix_raw" value="{{ old('prefix_raw', $item->prefix_raw) }}" maxlength="255">
++                    @error('prefix_raw')
++                        <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                    @enderror
++                    <div class="form-text mt-2">
++                        {{ trans('prefixes.admin.catalog.preview') }}:
++                        <span id="prefixPreview">{!! $formatter->toHtml(old('prefix_raw', $item->prefix_raw)) !!}</span>
++                    </div>
++                </div>
++
++                <div class="mb-3">
++                    <label class="form-label" for="categoryInput">{{ trans('prefixes.admin.catalog.category') }}</label>
++                    <select class="form-select @error('category') is-invalid @enderror" id="categoryInput" name="category" required>
++                        @foreach(\Azuriom\Models\PrefixCatalog::CATEGORIES as $category)
++                            <option value="{{ $category }}" @selected(old('category', $item->category) === $category)>
++                                {{ \Azuriom\Models\PrefixCatalog::categoryLabel($category) }}
++                            </option>
++                        @endforeach
++                    </select>
++                    @error('category')
++                        <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                    @enderror
++                </div>
++
++                <div class="mb-3">
++                    <label class="form-label" for="sortInput">{{ trans('prefixes.admin.catalog.sort') }}</label>
++                    <input type="number" min="0" max="999999" class="form-control @error('sort') is-invalid @enderror"
++                           id="sortInput" name="sort" value="{{ old('sort', $item->sort ?? 0) }}" required>
++                    @error('sort')
++                        <span class="invalid-feedback" role="alert"><strong>{{ $message }}</strong></span>
++                    @enderror
++                </div>
++
++                <div class="form-check mb-3">
++                    <input type="checkbox" class="form-check-input" id="enabledInput" name="enabled" value="1"
++                           @checked(old('enabled', $item->enabled))>
++                    <label class="form-check-label" for="enabledInput">{{ trans('prefixes.admin.catalog.enabled') }}</label>
++                </div>
++
++                <button type="submit" class="btn btn-primary">{{ trans('messages.actions.save') }}</button>
++                <a href="{{ route('admin.prefixes.index') }}" class="btn btn-secondary">{{ trans('messages.actions.cancel') }}</a>
++            </form>
++        </div>
++    </div>
++@endsection
+diff --git a/resources/views/admin/prefixes/index.blade.php b/resources/views/admin/prefixes/index.blade.php
+new file mode 100644
+index 0000000..a3d07ba
+--- /dev/null
++++ b/resources/views/admin/prefixes/index.blade.php
+@@ -0,0 +1,71 @@
++@extends('admin.layouts.admin')
++
++@section('title', trans('prefixes.admin.catalog.title'))
++
++@section('content')
++    <ul class="nav nav-tabs mb-3">
++        <li class="nav-item">
++            <a class="nav-link active" href="{{ route('admin.prefixes.index') }}">{{ trans('prefixes.admin.catalog.title') }}</a>
++        </li>
++        <li class="nav-item">
++            <a class="nav-link" href="{{ route('admin.prefixes.operations') }}">{{ trans('prefixes.admin.ops.title') }}</a>
++        </li>
++    </ul>
++
++    @unless($enabled)
++        <div class="alert alert-info">{{ trans('prefixes.admin.catalog.flag_off') }}</div>
++    @endunless
++
++    <div class="card shadow mb-4">
++        <div class="card-header d-flex align-items-center justify-content-between">
++            <h5 class="card-title mb-0">{{ trans('prefixes.admin.catalog.title') }}</h5>
++            <a href="{{ route('admin.prefixes.create') }}" class="btn btn-primary btn-sm">
++                <i class="bi bi-plus-lg"></i> {{ trans('prefixes.admin.catalog.create') }}
++            </a>
++        </div>
++        <div class="card-body">
++            <div class="table-responsive">
++                <table class="table table-striped align-middle">
++                    <thead>
++                    <tr>
++                        <th>{{ trans('prefixes.admin.catalog.group') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.display_name') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.preview') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.category') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.sort') }}</th>
++                        <th>{{ trans('prefixes.admin.catalog.enabled') }}</th>
++                        <th class="text-end"></th>
++                    </tr>
++                    </thead>
++                    <tbody>
++                    @forelse($items as $item)
++                        <tr>
++                            <td><code>{{ $item->group }}</code></td>
++                            <td>{{ $item->display_name }}</td>
++                            <td>{!! $formatter->toHtml($item->prefix_raw) !!}</td>
++                            <td>{{ \Azuriom\Models\PrefixCatalog::categoryLabel($item->category) }}</td>
++                            <td>{{ $item->sort }}</td>
++                            <td>{{ $item->enabled ? trans('messages.yes') : trans('messages.no') }}</td>
++                            <td class="text-end">
++                                <a href="{{ route('admin.prefixes.edit', $item) }}" class="btn btn-sm btn-outline-primary">
++                                    {{ trans('messages.actions.edit') }}
++                                </a>
++                                <form action="{{ route('admin.prefixes.destroy', $item) }}" method="POST" class="d-inline"
++                                      onsubmit="return confirm(@json(trans('messages.actions.confirm') ?? 'OK'))">
++                                    @csrf
++                                    @method('DELETE')
++                                    <button type="submit" class="btn btn-sm btn-outline-danger">{{ trans('messages.actions.delete') }}</button>
++                                </form>
++                            </td>
++                        </tr>
++                    @empty
++                        <tr>
++                            <td colspan="7" class="text-center text-muted">{{ trans('prefixes.admin.catalog.empty') }}</td>
++                        </tr>
++                    @endforelse
++                    </tbody>
++                </table>
++            </div>
++        </div>
++    </div>
++@endsection
+diff --git a/resources/views/admin/prefixes/operations.blade.php b/resources/views/admin/prefixes/operations.blade.php
+new file mode 100644
+index 0000000..ae2de16
+--- /dev/null
++++ b/resources/views/admin/prefixes/operations.blade.php
+@@ -0,0 +1,92 @@
++@extends('admin.layouts.admin')
++
++@section('title', trans('prefixes.admin.ops.title'))
++
++@section('content')
++    <ul class="nav nav-tabs mb-3">
++        <li class="nav-item">
++            <a class="nav-link" href="{{ route('admin.prefixes.index') }}">{{ trans('prefixes.admin.catalog.title') }}</a>
++        </li>
++        <li class="nav-item">
++            <a class="nav-link active" href="{{ route('admin.prefixes.operations') }}">{{ trans('prefixes.admin.ops.title') }}</a>
++        </li>
++    </ul>
++
++    <div class="card shadow mb-4">
++        <div class="card-body">
++            <form method="GET" class="row g-3 mb-4">
++                <div class="col-md-2">
++                    <label class="form-label" for="userIdInput">ID</label>
++                    <input type="number" class="form-control" id="userIdInput" name="user_id" value="{{ $userId }}">
++                </div>
++                <div class="col-md-3">
++                    <label class="form-label" for="playerInput">{{ trans('prefixes.admin.ops.user') }}</label>
++                    <input type="text" class="form-control" id="playerInput" name="player" value="{{ $player }}">
++                </div>
++                <div class="col-md-3">
++                    <label class="form-label" for="serverInput">{{ trans('prefixes.admin.ops.server') }}</label>
++                    <select class="form-select" id="serverInput" name="server_id">
++                        <option value="">{{ trans('messages.all') ?? '—' }}</option>
++                        @foreach($servers as $server)
++                            <option value="{{ $server->id }}" @selected((string) $serverId === (string) $server->id)>{{ $server->name }}</option>
++                        @endforeach
++                    </select>
++                </div>
++                <div class="col-md-2">
++                    <label class="form-label" for="statusInput">{{ trans('prefixes.admin.ops.status') }}</label>
++                    <select class="form-select" id="statusInput" name="status">
++                        <option value="">{{ trans('messages.all') ?? '—' }}</option>
++                        @foreach(['pending', 'applied', 'rejected'] as $statusKey)
++                            <option value="{{ $statusKey }}" @selected($status === $statusKey)>{{ trans('prefixes.status.'.$statusKey) }}</option>
++                        @endforeach
++                    </select>
++                </div>
++                <div class="col-md-2 d-flex align-items-end">
++                    <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> {{ trans('messages.actions.search') }}</button>
++                </div>
++            </form>
++
++            <div class="table-responsive">
++                <table class="table table-striped">
++                    <thead>
++                    <tr>
++                        <th>{{ trans('prefixes.admin.ops.op_id') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.user') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.server') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.group') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.status') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.reason') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.selected') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.source') }}</th>
++                        <th>{{ trans('prefixes.admin.ops.created') }}</th>
++                    </tr>
++                    </thead>
++                    <tbody>
++                    @forelse($operations as $op)
++                        <tr>
++                            <td><code>{{ \Illuminate\Support\Str::limit($op->id, 8, '') }}</code></td>
++                            <td>
++                                @if($op->user)
++                                    <a href="{{ route('admin.users.edit', $op->user) }}">{{ $op->user->name }}</a>
++                                @else
++                                    —
++                                @endif
++                            </td>
++                            <td>{{ $op->server?->name ?? '—' }}</td>
++                            <td>{{ $op->group ?? trans('prefixes.cabinet.auto') }}</td>
++                            <td>{{ $op->statusLabel() }}</td>
++                            <td class="small text-muted">{{ $op->reason ?: '—' }}</td>
++                            <td>{{ $op->selected ?? '—' }}</td>
++                            <td>{{ $op->source ?: '—' }}</td>
++                            <td>{{ format_date($op->created_at, true) }}</td>
++                        </tr>
++                    @empty
++                        <tr><td colspan="9" class="text-center text-muted">{{ trans('messages.none') }}</td></tr>
++                    @endforelse
++                    </tbody>
++                </table>
++            </div>
++            {{ $operations->links() }}
++        </div>
++    </div>
++@endsection
+diff --git a/resources/views/admin/users/_prefixes.blade.php b/resources/views/admin/users/_prefixes.blade.php
+new file mode 100644
+index 0000000..36df675
+--- /dev/null
++++ b/resources/views/admin/users/_prefixes.blade.php
+@@ -0,0 +1,79 @@
++@php
++    $prefixEnabled = \Azuriom\Services\Prefix\PrefixSelection::enabled();
++    $prefixBlocks = $prefixEnabled
++        ? app(\Azuriom\Services\Prefix\PrefixSelection::class)->cabinetServers($user)
++        : collect();
++@endphp
++
++<div class="card shadow mb-4" id="user-prefixes">
++    <div class="card-header d-flex align-items-center justify-content-between">
++        <h5 class="card-title mb-0">{{ trans('prefixes.admin.user.title') }}</h5>
++        <a href="{{ route('admin.prefixes.index') }}" class="btn btn-sm btn-outline-secondary">{{ trans('prefixes.admin.catalog.title') }}</a>
++    </div>
++    <div class="card-body">
++        @unless($prefixEnabled)
++            <div class="alert alert-info mb-0">{{ trans('prefixes.admin.catalog.flag_off') }}</div>
++        @else
++            @if($prefixBlocks->every(fn ($block) => $block['row'] === null))
++                <p class="text-muted mb-0">{{ trans('prefixes.admin.user.empty') }}</p>
++            @else
++                <div class="table-responsive">
++                    <table class="table table-sm table-bordered mb-0">
++                        <thead>
++                        <tr>
++                            <th>{{ trans('prefixes.admin.ops.server') }}</th>
++                            <th>{{ trans('prefixes.admin.user.selected') }}</th>
++                            <th>{{ trans('prefixes.admin.user.available') }}</th>
++                            <th></th>
++                        </tr>
++                        </thead>
++                        <tbody>
++                        @foreach($prefixBlocks as $block)
++                            @continue($block['row'] === null)
++                            <tr>
++                                <td>{{ $block['server']->name }}</td>
++                                <td>
++                                    @if($block['locked_staff'])
++                                        <div class="text-warning small">{{ trans('prefixes.admin.user.locked') }}</div>
++                                    @endif
++                                    @if($block['selected'])
++                                        @php $current = $block['options']->firstWhere('group', $block['selected']); @endphp
++                                        @if($current)
++                                            {!! $current['preview'] !!}
++                                            <span class="small">{{ $current['display_name'] }}</span>
++                                        @else
++                                            <code>{{ $block['selected'] }}</code>
++                                        @endif
++                                    @else
++                                        {{ trans('prefixes.cabinet.auto') }}
++                                    @endif
++                                    @if($block['pending'])
++                                        <div class="small text-info">{{ trans('prefixes.status.pending') }}: {{ $block['pending']->group ?: trans('prefixes.cabinet.auto') }}</div>
++                                    @endif
++                                </td>
++                                <td>
++                                    @forelse($block['options'] as $option)
++                                        <div class="small">{!! $option['preview'] !!} {{ $option['display_name'] }}</div>
++                                    @empty
++                                        —
++                                    @endforelse
++                                </td>
++                                <td class="text-end">
++                                    <form action="{{ route('admin.users.prefixes.reset', [$user, $block['server']]) }}"
++                                          method="POST"
++                                          onsubmit="return confirm(@json(trans('prefixes.admin.user.reset_confirm')))">
++                                        @csrf
++                                        <button type="submit" class="btn btn-sm btn-outline-warning" @disabled($block['pending'])>
++                                            {{ trans('prefixes.admin.user.reset') }}
++                                        </button>
++                                    </form>
++                                </td>
++                            </tr>
++                        @endforeach
++                        </tbody>
++                    </table>
++                </div>
++            @endif
++        @endunless
++    </div>
++</div>
+diff --git a/resources/views/admin/users/edit.blade.php b/resources/views/admin/users/edit.blade.php
+index 6aaf5fb..0efabaa 100755
+--- a/resources/views/admin/users/edit.blade.php
++++ b/resources/views/admin/users/edit.blade.php
+@@ -633,6 +633,8 @@
+         </div>
+     </div>
+ 
++    @include('admin.users._prefixes')
++
+     <div id="user-hwid">
+         @include('admin.users._hwid')
+     </div>
+diff --git a/resources/views/profile/_prefixes.blade.php b/resources/views/profile/_prefixes.blade.php
+new file mode 100644
+index 0000000..26a84e2
+--- /dev/null
++++ b/resources/views/profile/_prefixes.blade.php
+@@ -0,0 +1,47 @@
++{{-- Default-theme fallback; the coints theme ships a richer partial. --}}
++@php
++    $prefixSelection = app(\Azuriom\Services\Prefix\PrefixSelection::class);
++    $prefixServers = $prefixSelection->cabinetServers(auth()->user());
++    $selectRoute = Route::has('profile.prefixes.select')
++        ? route('profile.prefixes.select')
++        : url('/api/profile/prefixes/select');
++@endphp
++
++<div class="card mb-4">
++    <div class="card-header">{{ trans('prefixes.cabinet.title') }}</div>
++    <div class="card-body">
++        <p class="text-muted">{{ trans('prefixes.cabinet.intro') }}</p>
++        @forelse($prefixServers as $block)
++            <h6>{{ $block['server']->name }}</h6>
++            @if($block['locked_staff'])
++                <div class="alert alert-warning py-2">{{ trans('prefixes.cabinet.staff_locked') }}</div>
++            @endif
++            @if($block['row'] === null)
++                <p class="text-muted">{{ trans('prefixes.cabinet.not_synced') }}</p>
++            @else
++                <p>{{ trans('prefixes.cabinet.current') }}: {{ $block['selected'] ?: trans('prefixes.cabinet.auto') }}</p>
++                @if($block['pending'])
++                    <p class="text-info">{{ trans('prefixes.status.pending') }}</p>
++                @endif
++                <form action="{{ $selectRoute }}" method="POST" class="mb-2">
++                    @csrf
++                    <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
++                    <input type="hidden" name="group" value="">
++                    <button class="btn btn-sm btn-secondary" @disabled($block['pending'] || $block['locked_staff'])>{{ trans('prefixes.cabinet.auto') }}</button>
++                </form>
++                @foreach($block['options'] as $option)
++                    <form action="{{ $selectRoute }}" method="POST" class="mb-2">
++                        @csrf
++                        <input type="hidden" name="server_id" value="{{ $block['server']->id }}">
++                        <input type="hidden" name="group" value="{{ $option['group'] }}">
++                        <button class="btn btn-sm btn-primary" @disabled($block['pending'] || $block['locked_staff'])>
++                            {!! $option['preview'] !!} {{ $option['display_name'] }}
++                        </button>
++                    </form>
++                @endforeach
++            @endif
++        @empty
++            <p class="text-muted mb-0">{{ trans('prefixes.cabinet.empty') }}</p>
++        @endforelse
++    </div>
++</div>
+diff --git a/routes/admin.php b/routes/admin.php
+index d9b7059..5071781 100755
+--- a/routes/admin.php
++++ b/routes/admin.php
+@@ -5,6 +5,9 @@ use Azuriom\Http\Controllers\Admin\AdminController;
+ use Azuriom\Http\Controllers\Admin\BanController;
+ use Azuriom\Http\Controllers\Admin\HwidBanController;
+ use Azuriom\Http\Controllers\Admin\HwidController;
++use Azuriom\Http\Controllers\Admin\PrefixCatalogController;
++use Azuriom\Http\Controllers\Admin\PrefixOperationController;
++use Azuriom\Http\Controllers\Admin\PrefixUserController;
+ use Azuriom\Http\Controllers\Admin\HwidManageController;
+ use Azuriom\Http\Controllers\Admin\ImageController;
+ use Azuriom\Http\Controllers\Admin\NavbarController;
+@@ -73,6 +76,7 @@ Route::prefix('users')->name('users.')->middleware('can:admin.users')->group(fun
+     Route::delete('/{user}/hwid/ban', [HwidBanController::class, 'destroy'])->name('hwid.unban');
+     Route::post('/{user}/hwid/unlink', [HwidManageController::class, 'unlink'])->name('hwid.unlink');
+     Route::post('/{user}/hwid/split/{other}', [HwidManageController::class, 'split'])->name('hwid.split');
++    Route::post('/{user}/prefixes/{server}/reset', [PrefixUserController::class, 'reset'])->name('prefixes.reset');
+ });
+ 
+ Route::prefix('themes')->name('themes.')->middleware('can:admin.themes')->group(function () {
+@@ -124,6 +128,12 @@ Route::get('/currency-transactions', [CurrencyTransactionController::class, 'ind
+ Route::get('/currency-transactions/server-movements', [\Azuriom\Http\Controllers\Admin\CurrencyServerMovementController::class, 'index'])
+     ->name('currency-transactions.server-movements')
+     ->middleware('can:admin.users');
++Route::get('/prefixes/operations', [PrefixOperationController::class, 'index'])
++    ->name('prefixes.operations')
++    ->middleware('can:admin.users');
++Route::resource('prefixes', PrefixCatalogController::class)
++    ->except('show')
++    ->middleware('can:admin.users');
+ Route::prefix('users/money-grants')->name('users.money-grants.')->middleware(['can:admin.users.money', 'throttle:10,1'])->group(function () {
+     Route::get('/', [MoneyGrantController::class, 'index'])->name('index');
+     Route::post('/', [MoneyGrantController::class, 'store'])->name('store');

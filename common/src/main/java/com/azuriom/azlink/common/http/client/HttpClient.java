@@ -5,7 +5,10 @@ import com.azuriom.azlink.common.data.ServerData;
 import com.azuriom.azlink.common.data.UserInfo;
 import com.azuriom.azlink.common.data.WebsiteResponse;
 import com.azuriom.azlink.common.users.EditMoneyResult;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -86,6 +89,41 @@ public class HttpClient {
         return request(RequestMethod.POST, "/azlink/coins/operations/" + operationId + "/ack", params, com.google.gson.JsonObject.class);
     }
 
+    /**
+     * Game → site prefix snapshot. Body {@code {players:[{uuid,name,available,selected,locked_staff}]}}.
+     */
+    public CompletableFuture<JsonObject> reportPrefixes(JsonObject body) {
+        return request(RequestMethod.POST, "/azlink/prefixes/report", body, JsonObject.class);
+    }
+
+    /**
+     * Pending site → game prefix operations for this server (leased until ack or expiry).
+     */
+    public CompletableFuture<JsonObject> fetchPrefixOperations(int limit) {
+        return request(RequestMethod.GET, "/azlink/prefixes/operations?limit=" + limit, null, JsonObject.class);
+    }
+
+    /**
+     * Acknowledge a {@code prefix_select} operation. {@code status} is {@code applied} or {@code rejected}.
+     * Idempotent on the site. {@code selected} is the group now active in-game ({@code null} = Авто).
+     *
+     * <p>Name {@code ackPrefix} is the cointcore reflective lookup; {@link #ackPrefixOperation}
+     * is kept as an alias.
+     */
+    public CompletableFuture<JsonObject> ackPrefix(String opId, String status, String reason, String selected) {
+        JsonObject params = new JsonObject();
+        params.addProperty("op_id", opId);
+        params.addProperty("status", status);
+        params.add("reason", reason == null ? JsonNull.INSTANCE : new JsonPrimitive(reason));
+        params.add("selected", selected == null ? JsonNull.INSTANCE : new JsonPrimitive(selected));
+        return request(RequestMethod.POST, "/azlink/prefixes/ack", params, JsonObject.class);
+    }
+
+    /** @see #ackPrefix(String, String, String, String) */
+    public CompletableFuture<JsonObject> ackPrefixOperation(String opId, String status, String reason, String selected) {
+        return ackPrefix(opId, status, reason, selected);
+    }
+
     public CompletableFuture<WebsiteResponse> postData(ServerData data) {
         return request(RequestMethod.POST, "/azlink", data, WebsiteResponse.class);
     }
@@ -95,7 +133,10 @@ public class HttpClient {
     }
 
     public <T> CompletableFuture<T> request(RequestMethod method, String endpoint, Object params, Class<T> clazz) {
-        String body = AzLinkPlugin.getGson().toJson(params);
+        // JsonElement.toString() keeps explicit JSON nulls (prefix ack selected/reason).
+        String body = params instanceof JsonElement
+                ? params.toString()
+                : AzLinkPlugin.getGson().toJson(params);
 
         return CompletableFuture.supplyAsync(() -> {
             try {
