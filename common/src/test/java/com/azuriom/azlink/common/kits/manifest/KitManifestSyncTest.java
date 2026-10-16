@@ -64,6 +64,21 @@ class KitManifestSyncTest {
     }
 
     @Test
+    void metadataExtractionMapsUnknownRarityToCommon() {
+        ItemStackSnapshot snapshot = ItemStackSnapshot.builder()
+                .slot(0)
+                .semanticKey("aether_loot")
+                .registryId("aether:loot_item")
+                .displayName("Aether Loot")
+                .quantity(1)
+                .rarity("aether:loot")
+                .build();
+
+        ManifestItem item = new DefaultItemMetadataExtractor().extract(snapshot, ItemIconRef.none());
+        assertEquals("common", item.getRarity());
+    }
+
+    @Test
     void tooltipExtractorTruncatesAndDropsBlanks() {
         String longLine = repeat('x', KitManifestLimits.MAX_TOOLTIP_LINE_LENGTH + 10);
         ItemStackSnapshot snapshot = ItemStackSnapshot.builder()

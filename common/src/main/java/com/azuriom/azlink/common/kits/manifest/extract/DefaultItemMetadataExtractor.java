@@ -60,8 +60,9 @@ public final class DefaultItemMetadataExtractor implements ItemMetadataExtractor
         }
 
         String rarity = snapshot.getRarity() == null ? "common" : snapshot.getRarity().trim().toLowerCase(Locale.ROOT);
+        // Site normalizes unknown values to common; modded rarities (e.g. aether:loot) are not vanilla.
         if (!RARITIES.contains(rarity)) {
-            throw new IllegalArgumentException("invalid rarity: " + rarity);
+            rarity = "common";
         }
 
         String modName = optionalString(snapshot.getModName(), KitManifestLimits.MAX_STRING);
