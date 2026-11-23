@@ -1,5 +1,6 @@
 package com.azuriom.azlink.common.kits.manifest.render;
 
+import com.azuriom.azlink.common.kits.manifest.KitManifestLimits;
 import com.azuriom.azlink.common.logger.LoggerAdapter;
 
 import java.util.ArrayList;
@@ -108,6 +109,35 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
 
     public IconRenderCache getCache() {
         return this.cache;
+    }
+
+    /** Render a large manifest sequentially without increasing the existing packet or in-flight limits. */
+    public CompletableFuture<BatchResult> requestIconsInBatches(UUID preferredPlayer, List<RenderItemPayload> items) {
+        if (items == null || items.size() <= ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST) {
+            return requestIcons(preferredPlayer, items);
+        }
+        if (items.size() > KitManifestLimits.MAX_ITEMS) {
+            return CompletableFuture.completedFuture(new BatchResult(
+                    Collections.<String, RenderedIcon>emptyMap(),
+                    Collections.<String>emptySet(), "batch_too_large"));
+        }
+
+        CompletableFuture<BatchResult> chain = CompletableFuture.completedFuture(new BatchResult(
+                Collections.<String, RenderedIcon>emptyMap(), Collections.<String>emptySet(), null));
+        for (int offset = 0; offset < items.size(); offset += ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST) {
+            final List<RenderItemPayload> batch = new ArrayList<RenderItemPayload>(items.subList(
+                    offset, Math.min(items.size(), offset + ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST)));
+            chain = chain.thenCompose(previous -> requestIcons(preferredPlayer, batch).thenApply(next -> {
+                Map<String, RenderedIcon> rendered = new HashMap<String, RenderedIcon>(previous.getRendered());
+                rendered.putAll(next.getRendered());
+                Set<String> failed = new HashSet<String>(previous.getFailedKeys());
+                failed.addAll(next.getFailedKeys());
+                failed.removeAll(rendered.keySet());
+                return new BatchResult(rendered, failed,
+                        previous.getError() == null ? next.getError() : previous.getError());
+            }));
+        }
+        return chain;
     }
 
     /**

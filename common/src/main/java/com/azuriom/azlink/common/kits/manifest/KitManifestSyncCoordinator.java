@@ -88,6 +88,10 @@ public final class KitManifestSyncCoordinator {
             return CompletableFuture.completedFuture(
                     KitManifestSyncResult.fail(0, "items required", null));
         }
+        if (serverItems.size() > KitManifestLimits.MAX_ITEMS) {
+            return CompletableFuture.completedFuture(KitManifestSyncResult.fail(0,
+                    "too many items: " + serverItems.size() + " (limit " + KitManifestLimits.MAX_ITEMS + ")", null));
+        }
 
         List<RenderItemPayload> renderPayloads = new ArrayList<RenderItemPayload>();
         List<ServerKitItem> ordered = new ArrayList<ServerKitItem>(serverItems);
@@ -106,7 +110,7 @@ public final class KitManifestSyncCoordinator {
         final Integer cooldown = cooldownSeconds;
         final boolean mirror = mirrorToSite;
 
-        return this.renderCoordinator.requestIcons(preferredRenderPlayer, renderPayloads)
+        return this.renderCoordinator.requestIconsInBatches(preferredRenderPlayer, renderPayloads)
                 .thenCompose(batch -> uploadIconsThenManifest(trimmedKey, manifestVersion,
                         ordered, indexByKey, batch, nameHint, cooldown, mirror));
     }

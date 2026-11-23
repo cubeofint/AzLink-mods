@@ -1,12 +1,14 @@
 package com.azuriom.azlink.common.kits.manifest.render;
 
 import com.azuriom.azlink.common.logger.LoggerAdapter;
+import com.azuriom.azlink.common.kits.manifest.KitManifestLimits;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -17,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class ItemIconRenderSecurityTest {
 
@@ -173,6 +176,79 @@ class ItemIconRenderSecurityTest {
                 new com.azuriom.azlink.common.config.PluginConfig("supersecrettokenvalue", "https://example.test");
         assertFalse(cfg.toString().contains("supersecrettokenvalue"));
         assertTrue(cfg.toString().contains("redacted"));
+    }
+
+    @Test
+    void largeManifestUsesSequentialExistingSizePackets() throws Exception {
+        this.registry.register(this.player, ClientCapabilities.v1("t"));
+        List<RenderItemPayload> items = payloads(129);
+        java.util.concurrent.CompletableFuture<ItemIconRenderCoordinator.BatchResult> future =
+                this.coordinator.requestIconsInBatches(this.player, items);
+        byte[] png = png64();
+        String hash = PngIconValidator.authoritativeSha256(png);
+        int total = 0;
+        for (int batch = 0; batch < 3; batch++) {
+            assertFalse(future.isDone());
+            assertEquals(batch + 1, this.transport.sendCount);
+            ItemIconRenderRequest sent = this.transport.lastRequest;
+            assertTrue(sent.getItems().size() <= ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST);
+            List<IconRenderResult> response = new ArrayList<IconRenderResult>();
+            for (RenderItemPayload item : sent.getItems()) {
+                response.add(IconRenderResult.rendered(item.getRenderKey(), png, hash));
+            }
+            total += sent.getItems().size();
+            this.coordinator.onResponse(this.player, new ItemIconRenderResponse(sent.getRequestId(), 1, "t", response));
+        }
+        ItemIconRenderCoordinator.BatchResult result = future.get(1, TimeUnit.SECONDS);
+        assertEquals(129, total);
+        assertEquals(129, result.getRendered().size());
+        assertTrue(result.getFailedKeys().isEmpty());
+        assertNull(result.getError());
+    }
+
+    @Test
+    void oversizedSinglePacketStillRejected() throws Exception {
+        ItemIconRenderCoordinator.BatchResult result = this.coordinator.requestIcons(this.player, payloads(65))
+                .get(1, TimeUnit.SECONDS);
+        assertEquals("batch_too_large", result.getError());
+        assertEquals(0, this.transport.sendCount);
+        result = this.coordinator.requestIconsInBatches(this.player, payloads(KitManifestLimits.MAX_ITEMS + 1))
+                .get(1, TimeUnit.SECONDS);
+        assertEquals("batch_too_large", result.getError());
+        assertEquals(0, this.transport.sendCount);
+    }
+
+    @Test
+    void largeManifestRetainsCacheAndMissingRendererResult() throws Exception {
+        List<RenderItemPayload> items = payloads(65);
+        this.cache.put(items.get(0).getRenderKey(), "a".repeat(64));
+        ItemIconRenderCoordinator.BatchResult result = this.coordinator.requestIconsInBatches(this.player, items)
+                .get(1, TimeUnit.SECONDS);
+        assertEquals(1, result.getRendered().size());
+        assertEquals(64, result.getFailedKeys().size());
+        assertTrue(result.isRendererUnavailable());
+        assertEquals(0, this.transport.sendCount);
+    }
+
+    @Test
+    void disconnectDuringLargeManifestCompletesRemainingBatches() throws Exception {
+        this.registry.register(this.player, ClientCapabilities.v1("t"));
+        java.util.concurrent.CompletableFuture<ItemIconRenderCoordinator.BatchResult> future =
+                this.coordinator.requestIconsInBatches(this.player, payloads(129));
+        this.coordinator.onDisconnect(this.player);
+        ItemIconRenderCoordinator.BatchResult result = future.get(1, TimeUnit.SECONDS);
+        assertEquals("client_disconnect", result.getError());
+        assertEquals(129, result.getFailedKeys().size());
+        assertEquals(1, this.transport.sendCount);
+    }
+
+    private static List<RenderItemPayload> payloads(int count) {
+        List<RenderItemPayload> items = new ArrayList<RenderItemPayload>();
+        for (int slot = 0; slot < count; slot++) {
+            byte[] bytes = new byte[]{(byte) slot, (byte) (slot >> 8)};
+            items.add(new RenderItemPayload(RenderKey.fromItemStackBytes(slot, bytes).getValue(), slot, bytes));
+        }
+        return items;
     }
 
     private static byte[] png64() throws Exception {

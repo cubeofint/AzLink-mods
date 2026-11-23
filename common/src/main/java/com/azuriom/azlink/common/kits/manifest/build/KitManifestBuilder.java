@@ -64,7 +64,8 @@ public final class KitManifestBuilder {
             throw new IllegalArgumentException("items required");
         }
         if (items.size() > KitManifestLimits.MAX_ITEMS) {
-            throw new IllegalArgumentException("too many items");
+            throw new IllegalArgumentException("too many items: " + items.size()
+                    + " (limit " + KitManifestLimits.MAX_ITEMS + ")");
         }
         List<ManifestItem> sorted = sortItems(items);
         String hash = computeManifestHash(sorted);
@@ -155,7 +156,8 @@ public final class KitManifestBuilder {
                 metadata.addProperty(entry.getKey(), String.valueOf(value));
             }
         }
-        json.add("metadata", metadata);
+        // PHP normalizes an empty associative metadata array to [] before computing its hash.
+        json.add("metadata", metadata.size() == 0 ? new JsonArray() : metadata);
 
         ItemIconRef icon = item.getIcon() == null ? ItemIconRef.none() : item.getIcon();
         JsonObject iconJson = new JsonObject();

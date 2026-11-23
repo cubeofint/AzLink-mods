@@ -28,3 +28,13 @@ plugin.getKitManifestSyncCoordinator().retireOnSite(deliveryKey);
 ```
 
 Commercial price / privilege bindings remain editable in admin; inventory mirrors from Minecraft.
+
+## Large kits
+
+Manifests support up to 256 item positions. The website's `shop.kit_manifest.max_items`
+must match; `max_payload_bytes` should be 2097152 (2 MiB). Existing metadata and PNG
+validation limits remain in place.
+
+Icon rendering is split into sequential requests of at most 64 items. The render
+protocol and packet limits are unchanged, so existing compatible clients can render
+large kits without a client update.

@@ -14,11 +14,14 @@ import com.azuriom.azlink.common.kits.manifest.model.NamedAttribute;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -162,6 +165,44 @@ class KitManifestSyncTest {
     void publicApiInterfaceIsStable() {
         assertNotNull(KitManifestProvider.class);
         assertEquals(2, KitManifestProvider.class.getDeclaredMethods().length);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {36, 54, 60, 64, 65, 129, 256})
+    void largeManifestsKeepEverySlotAndQuantity(int count) {
+        List<ManifestItem> items = new ArrayList<ManifestItem>();
+        for (int slot = 0; slot < count; slot++) {
+            items.add(new DefaultItemMetadataExtractor().extract(ItemStackSnapshot.builder()
+                    .slot(slot).semanticKey("item_" + slot).registryId("minecraft:stone")
+                    .displayName("Item " + slot).quantity(slot + 1).build(), ItemIconRef.none()));
+        }
+        KitManifestUploadRequest request = KitManifestBuilder.buildRequest("large_kit", 2, "test", items);
+        assertEquals(count, request.getItems().size());
+        assertEquals(count - 1, request.getItems().get(count - 1).getSlot());
+        assertEquals(count, request.getItems().get(count - 1).getQuantity().intValue());
+        assertEquals(64, request.getManifestHash().length());
+    }
+
+    @Test
+    void manifestItemLimitStillRejectsOversizedInput() {
+        ManifestItem item = new DefaultItemMetadataExtractor().extract(ItemStackSnapshot.builder()
+                .slot(0).semanticKey("stone").registryId("minecraft:stone")
+                .displayName("Stone").quantity(1).build(), ItemIconRef.none());
+        assertThrows(IllegalArgumentException.class, () -> KitManifestBuilder.buildRequest(
+                "large_kit", 1, "test", Collections.nCopies(KitManifestLimits.MAX_ITEMS + 1, item)));
+    }
+
+    @Test
+    void emptyMetadataUsesPhpCanonicalShape() {
+        ManifestItem item = new DefaultItemMetadataExtractor().extract(ItemStackSnapshot.builder()
+                .slot(0).semanticKey("stone").registryId("minecraft:stone")
+                .displayName("Stone").quantity(1).build(), ItemIconRef.none());
+        JsonObject expected = new JsonParser().parse("{\"items\":[{\"slot\":0,\"semantic_key\":\"stone\","
+                + "\"registry_id\":\"minecraft:stone\",\"display_name\":\"Stone\",\"quantity\":1,"
+                + "\"rarity\":\"common\",\"tooltip\":[],\"attributes\":[],\"enchantments\":[],"
+                + "\"metadata\":[],\"icon\":{\"type\":\"none\",\"reference\":null}}]}").getAsJsonObject();
+        assertEquals(CanonicalJson.encode(expected),
+                CanonicalJson.encode(KitManifestBuilder.toCanonicalPayload(Collections.singletonList(item))));
     }
 
     private static byte[] minimalPng() {

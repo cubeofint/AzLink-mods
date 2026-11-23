@@ -6,7 +6,7 @@ package com.azuriom.azlink.common.kits.manifest;
 public final class KitManifestLimits {
 
     public static final int PROTOCOL_VERSION = 1;
-    public static final int MAX_ITEMS = 54;
+    public static final int MAX_ITEMS = 256;
     public static final int MAX_TOOLTIP_LINES = 32;
     public static final int MAX_TOOLTIP_LINE_LENGTH = 500;
     public static final int MAX_ATTRIBUTES = 32;
@@ -17,7 +17,7 @@ public final class KitManifestLimits {
     public static final int MAX_SEMANTIC_KEY = 64;
     public static final int MAX_REGISTRY_ID = 191;
     public static final int MAX_ICON_BYTES = 262144;
-    public static final int MAX_PAYLOAD_BYTES = 262144;
+    public static final int MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
     private KitManifestLimits() {
     }
