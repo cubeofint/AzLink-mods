@@ -25,7 +25,7 @@ dependencies {
     def forgeVersion = "${project.ext.minecraft_version}-${project.ext.forge_version}"
 
     // Shade only our deps — shadow must not resolve minecraft/forge (breaks ForgeGradle repos).
-    shade project(':azlink-common')
+    shade "com.azuriom:azlink-common:${project.version}"
     // Instant commands HTTP pipeline needs HttpRequestDecoder / HttpResponseEncoder.
     shade("io.netty:netty-codec-http:${project.ext.netty_version}") {
         transitive = false

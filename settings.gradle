@@ -16,7 +16,6 @@ plugins {
 rootProject.name = 'azlink'
 
 def modules = [
-        'common',
         'forge',
         'neoforge',
 ]
@@ -25,6 +24,9 @@ modules.each {
     include ":azlink-${it}"
     project(":azlink-${it}").projectDir = file(it)
 }
+
+// Import the shared Java 8 core once, including when the legacy build also references it.
+includeBuild('common') { name = 'azlink-common' }
 
 // Forge 1.7.10 uses RetroFuturaGradle in an isolated included build (avoids FG6 clash).
 includeBuild('forge-1.7.10')

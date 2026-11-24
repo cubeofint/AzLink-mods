@@ -75,6 +75,7 @@ public class AzLinkPlugin {
     private volatile ItemIconRenderTransport itemIconRenderTransport = NOOP_TRANSPORT;
     private ItemIconRenderCoordinator itemIconRenderCoordinator;
     private KitManifestSyncCoordinator kitManifestSyncCoordinator;
+    private com.azuriom.azlink.common.kits.PlatformKitPublisher platformKitPublisher;
 
     private PluginConfig config = new PluginConfig(null, null);
     private HttpServer httpServer;
@@ -103,6 +104,8 @@ public class AzLinkPlugin {
                         uuid -> getPlatform().getOnlinePlayers().anyMatch(p -> p.getUuid().equals(uuid))),
                 this.iconRenderCache,
                 new ItemIconRenderTransport() {
+                    @Override
+                    public int maxBatchItems() { return AzLinkPlugin.this.itemIconRenderTransport.maxBatchItems(); }
                     @Override
                     public void sendRequest(java.util.UUID playerId, ItemIconRenderRequest request) {
                         AzLinkPlugin.this.itemIconRenderTransport.sendRequest(playerId, request);
@@ -295,6 +298,16 @@ public class AzLinkPlugin {
 
     public KitManifestSyncCoordinator getKitManifestSyncCoordinator() {
         return this.kitManifestSyncCoordinator;
+    }
+
+    public void installKitCatalog(com.azuriom.azlink.common.kits.PlatformKitCatalog catalog) {
+        this.platformKitPublisher = new com.azuriom.azlink.common.kits.PlatformKitPublisher(this, catalog);
+        installKitCreditHandler(this.platformKitPublisher.creditHandler(false));
+        installKitRedeemHandler(this.platformKitPublisher.creditHandler(true));
+    }
+
+    public com.azuriom.azlink.common.kits.PlatformKitPublisher getPlatformKitPublisher() {
+        return this.platformKitPublisher;
     }
 
     public KitManifestVersionStore getKitManifestVersionStore() {

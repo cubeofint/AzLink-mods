@@ -33,6 +33,11 @@ public final class ClientCapabilities {
         );
     }
 
+    public static ClientCapabilities withLocalizedNames(String rendererVersion) {
+        return new ClientCapabilities(ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION, true,
+                rendererVersion, ItemIconRenderProtocol.ICON_SIZE, ItemIconRenderProtocol.IMAGE_FORMAT);
+    }
+
     public int getProtocolVersion() {
         return this.protocolVersion;
     }
@@ -54,7 +59,7 @@ public final class ClientCapabilities {
     }
 
     public boolean isCompatibleWithServer() {
-        return this.protocolVersion == ItemIconRenderProtocol.VERSION
+        return ItemIconRenderProtocol.isSupported(this.protocolVersion)
                 && this.supportsItemIconRendering
                 && this.supportedIconSize == ItemIconRenderProtocol.ICON_SIZE
                 && ItemIconRenderProtocol.IMAGE_FORMAT.equalsIgnoreCase(this.supportedImageFormat);

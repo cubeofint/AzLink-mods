@@ -65,6 +65,12 @@ public final class ManifestItem {
         return this.registryId;
     }
 
+    public ManifestItem withDisplayName(String name) {
+        return new ManifestItem(this.slot, this.semanticKey, this.registryId, name,
+                this.quantity, this.modName, this.rarity, this.tooltip, this.attributes,
+                this.enchantments, this.metadata, this.icon);
+    }
+
     public String getDisplayName() {
         return this.displayName;
     }

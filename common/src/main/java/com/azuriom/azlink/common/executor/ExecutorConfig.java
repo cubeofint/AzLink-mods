@@ -93,6 +93,14 @@ public class ExecutorConfig {
                 : Collections.unmodifiableList(this.supportedOperationTypes);
     }
 
+    /** A kit-only platform must not advertise the development mock privilege/group handlers. */
+    public void limitToKitOperations() {
+        List<String> supported = new ArrayList<String>();
+        for (String type : getSupportedOperationTypes())
+            if ("kit_credit".equals(type) || "kit_redeem".equals(type)) supported.add(type);
+        this.supportedOperationTypes = supported;
+    }
+
     public List<String> getSupportedCapabilities() {
         return this.supportedCapabilities == null
                 ? Collections.<String>emptyList()

@@ -6,6 +6,12 @@ package com.azuriom.azlink.common.kits.manifest.render;
 public final class ItemIconRenderProtocol {
 
     public static final int VERSION = 1;
+    /** Negotiated only with clients that can return localized item names. */
+    public static final int LOCALIZED_NAMES_VERSION = 2;
+
+    public static boolean isSupported(int version) {
+        return version == VERSION || version == LOCALIZED_NAMES_VERSION;
+    }
     public static final int ICON_SIZE = 64;
     public static final String IMAGE_FORMAT = "png";
 

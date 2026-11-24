@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
 
 public class AzLinkCommand {
 
-    private static final List<String> COMPLETIONS = Arrays.asList("status", "setup", "fetch", "coins", "money", "port");
+    private static final List<String> COMPLETIONS = Arrays.asList("status", "setup", "fetch", "coins", "money", "port", "kits");
     private static final String COINS_USAGE = "Usage: /azlink coins <add|remove|deposit|withdraw> <player> <amount>";
 
     protected final AzLinkPlugin plugin;
@@ -39,6 +39,21 @@ public class AzLinkCommand {
 
         if (args.length == 0) {
             sendUsage(sender);
+            return;
+        }
+
+        if (args[0].equalsIgnoreCase("kits")) {
+            com.azuriom.azlink.common.kits.PlatformKitPublisher publisher = this.plugin.getPlatformKitPublisher();
+            if (publisher == null || args.length != 3 || !args[1].equalsIgnoreCase("publish")) {
+                sender.sendMessage(TextComponent.text("Usage: /azlink kits publish <kit> (kit integration required)", TextColor.RED));
+                return;
+            }
+            publisher.publish(args[2], sender.getUuid()).whenComplete((result, error) ->
+                    this.plugin.getScheduler().executeSync(() -> sender.sendMessage(TextComponent.text(
+                            error == null && result != null && result.isSuccess()
+                                    ? "Kit published. Apply its incoming version in the website dashboard."
+                                    : "Kit publication failed: " + (error != null ? error.getMessage() : result == null ? "no result" : result.getError()),
+                            error == null && result != null && result.isSuccess() ? TextColor.GREEN : TextColor.RED))));
             return;
         }
 
@@ -141,6 +156,11 @@ public class AzLinkCommand {
                     .filter(s -> startsWithIgnoreCase(s, args[1]))
                     .collect(Collectors.toList());
         }
+
+        if (args.length == 2 && args[0].equalsIgnoreCase("kits")) return Collections.singletonList("publish");
+        if (args.length == 3 && args[0].equalsIgnoreCase("kits") && this.plugin.getPlatformKitPublisher() != null)
+            return this.plugin.getPlatformKitPublisher().names().stream()
+                    .filter(name -> startsWithIgnoreCase(name, args[2])).collect(Collectors.toList());
 
         if (args.length == 3 && isCoinsCommand(args[0])) {
             return this.plugin.getPlatform().getOnlinePlayers()

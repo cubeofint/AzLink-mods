@@ -70,6 +70,8 @@ public class SemanticExecutorService {
 
         try {
             this.config = loadOrCreateConfig();
+            if (this.plugin.getPlatformKitPublisher() != null && this.privilegeBackend == null)
+                this.config.limitToKitOperations();
             CapabilityKeys.Resolution capabilities = CapabilityKeys.resolve(
                     this.config.getSupportedCapabilities(), this.luckPermsAcceptAllCapabilities);
             this.config.setSupportedCapabilities(capabilities.getAdvertised());
@@ -94,7 +96,7 @@ public class SemanticExecutorService {
                     this.pollTask, initialDelayMs, intervalSec * 1000L, TimeUnit.MILLISECONDS);
 
             this.plugin.getLogger().info("[SemanticExecutor] started executor "
-                    + (this.privilegeBackend == null ? "mock-privileges " : "luckperms ")
+                    + (this.privilegeBackend == null ? (this.plugin.getPlatformKitPublisher() == null ? "mock-privileges " : "kit-only ") : "luckperms ")
                     + this.config.getExecutorVersion()
                     + " protocol=" + this.config.getProtocolVersion()
                     + " poll=" + intervalSec + "s"

@@ -7,6 +7,7 @@ import java.util.UUID;
  * Implementations live in server/client platform modules — never on HTTP to site.
  */
 public interface ItemIconRenderTransport {
+    default int maxBatchItems() { return ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST; }
 
     void sendRequest(UUID playerId, ItemIconRenderRequest request);
 

@@ -47,12 +47,24 @@ minecraft {
 }
 
 configurations {
-    embed
+    embed {
+        // Embed the shared JAR, not its separate classes/resources variants.
+        attributes {
+            attribute(LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+                    objects.named(LibraryElements, LibraryElements.JAR))
+            // Common, Gson and Netty have no Minecraft names to remap.
+            attribute(com.gtnewhorizons.retrofuturagradle.ObfuscationAttribute.OBFUSCATION_ATTRIBUTE,
+                    com.gtnewhorizons.retrofuturagradle.ObfuscationAttribute.getNoMinecraft(objects))
+        }
+    }
 }
 
 dependencies {
     // Compile against common; embed classes into the final JAR (avoid RFG attribute clash).
-    implementation project(':azlink-common')
+    implementation "com.azuriom:azlink-common:${project.version}"
+    embed("com.azuriom:azlink-common:${project.version}") {
+        transitive = false
+    }
     embed("com.google.code.gson:gson:${project.ext.gson_version}") {
         transitive = false
     }
@@ -75,7 +87,6 @@ processResources {
 jar {
     archiveFileName = "AzLink-Forge-${project.version}-${project.ext.minecraft_version}-dev.jar"
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from project(':azlink-common').sourceSets.main.output
     from {
         configurations.embed.collect { it.isDirectory() ? it : zipTree(it) }
     }

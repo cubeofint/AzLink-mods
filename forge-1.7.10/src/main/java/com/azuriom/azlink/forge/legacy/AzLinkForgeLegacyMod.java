@@ -35,6 +35,8 @@ import java.util.stream.Stream;
 public final class AzLinkForgeLegacyMod implements AzLinkPlatform {
 
     public static final String MODID = "azlink";
+    private static AzLinkForgeLegacyMod instance;
+    public static AzLinkForgeLegacyMod instance() { return instance; }
 
     private final LoggerAdapter logger = new FmlLoggerAdapter();
     private final TpsTask tpsTask = new TpsTask();
@@ -46,6 +48,9 @@ public final class AzLinkForgeLegacyMod implements AzLinkPlatform {
 
     @EventHandler
     public void preInit(FMLPreInitializationEvent event) {
+        instance = this;
+        com.azuriom.azlink.forge.legacy.network.LegacyItemIcons.register();
+        if (event.getSide().isClient()) com.azuriom.azlink.forge.legacy.client.LegacyIconClient.init();
         File configDir = new File(event.getModConfigurationDirectory(), MODID);
         if (!configDir.exists() && !configDir.mkdirs()) {
             this.logger.warn("Unable to create config directory: " + configDir.getAbsolutePath());
@@ -58,6 +63,8 @@ public final class AzLinkForgeLegacyMod implements AzLinkPlatform {
     @EventHandler
     public void onServerStarting(FMLServerStartingEvent event) {
         this.server = event.getServer();
+        this.plugin.installKitCatalog(new com.azuriom.azlink.forge.legacy.kits.LegacyKitCatalog());
+        this.plugin.setItemIconRenderTransport(new com.azuriom.azlink.forge.legacy.network.LegacyItemIcons(this.plugin));
         event.registerServerCommand(new AzLinkLegacyCommand(this.plugin));
         this.plugin.init();
     }
@@ -145,6 +152,8 @@ public final class AzLinkForgeLegacyMod implements AzLinkPlatform {
     public int getMaxPlayers() {
         return this.server != null ? this.server.getMaxPlayers() : 0;
     }
+
+    @Override public boolean isDedicatedServerSiteLinkAllowed() { return this.server != null && this.server.isDedicatedServer(); }
 
     @Override
     public void dispatchConsoleCommand(String command) {

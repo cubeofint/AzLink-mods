@@ -45,6 +45,8 @@ public final class AzLinkForgeMod implements AzLinkPlatform {
 
     public static final String MODID = "azlink";
     private static final Logger LOGGER = LoggerFactory.getLogger("azlink");
+    private static AzLinkForgeMod instance;
+    public static AzLinkForgeMod instance() { return instance; }
 
     private final LoggerAdapter logger = new Slf4jLoggerAdapter(LOGGER);
     private final TpsTask tpsTask = new TpsTask();
@@ -56,7 +58,11 @@ public final class AzLinkForgeMod implements AzLinkPlatform {
     private SchedulerAdapter scheduler;
 
     public AzLinkForgeMod() {
+        instance = this;
         this.plugin = new AzLinkPlugin(this);
+        com.azuriom.azlink.forge.network.ForgeItemIcons.register();
+        net.minecraftforge.fml.DistExecutor.unsafeRunWhenOn(net.minecraftforge.api.distmarker.Dist.CLIENT,
+                () -> () -> com.azuriom.azlink.forge.client.ForgeIconClient.init());
 
         Path defaultDataDirectory = FMLPaths.CONFIGDIR.get().resolve(MODID);
         Path legacyDataDirectory = FMLPaths.CONFIGDIR.get().resolve("AzLink");
@@ -76,6 +82,9 @@ public final class AzLinkForgeMod implements AzLinkPlatform {
     public void onServerStarting(ServerAboutToStartEvent event) {
         this.server = event.getServer();
         this.scheduler = this.initScheduler();
+        this.plugin.installKitCatalog(new com.azuriom.azlink.forge.kits.ForgeKitCatalog());
+        this.plugin.setItemIconRenderTransport(new com.azuriom.azlink.forge.network.ForgeItemIcons(this.plugin,
+                id -> this.server == null ? null : this.server.getPlayerList().getPlayer(id)));
         this.plugin.init();
     }
 

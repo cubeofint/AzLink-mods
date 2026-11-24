@@ -29,8 +29,14 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
         private final String renderKey;
         private final String iconHash;
         private final byte[] pngBytes;
+        private final String displayName;
 
         public RenderedIcon(String renderKey, String iconHash, byte[] pngBytes) {
+            this(renderKey, iconHash, pngBytes, null);
+        }
+
+        public RenderedIcon(String renderKey, String iconHash, byte[] pngBytes, String displayName) {
+            this.displayName = displayName;
             this.renderKey = renderKey;
             this.iconHash = iconHash;
             this.pngBytes = pngBytes;
@@ -38,6 +44,10 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
 
         public String getRenderKey() {
             return this.renderKey;
+        }
+
+        public String getDisplayName() {
+            return this.displayName;
         }
 
         public String getIconHash() {
@@ -113,7 +123,8 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
 
     /** Render a large manifest sequentially without increasing the existing packet or in-flight limits. */
     public CompletableFuture<BatchResult> requestIconsInBatches(UUID preferredPlayer, List<RenderItemPayload> items) {
-        if (items == null || items.size() <= ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST) {
+        int batchLimit = Math.max(1, Math.min(ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST, this.transport.maxBatchItems()));
+        if (items == null || items.size() <= batchLimit) {
             return requestIcons(preferredPlayer, items);
         }
         if (items.size() > KitManifestLimits.MAX_ITEMS) {
@@ -124,9 +135,9 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
 
         CompletableFuture<BatchResult> chain = CompletableFuture.completedFuture(new BatchResult(
                 Collections.<String, RenderedIcon>emptyMap(), Collections.<String>emptySet(), null));
-        for (int offset = 0; offset < items.size(); offset += ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST) {
+        for (int offset = 0; offset < items.size(); offset += batchLimit) {
             final List<RenderItemPayload> batch = new ArrayList<RenderItemPayload>(items.subList(
-                    offset, Math.min(items.size(), offset + ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST)));
+                    offset, Math.min(items.size(), offset + batchLimit)));
             chain = chain.thenCompose(previous -> requestIcons(preferredPlayer, batch).thenApply(next -> {
                 Map<String, RenderedIcon> rendered = new HashMap<String, RenderedIcon>(previous.getRendered());
                 rendered.putAll(next.getRendered());
@@ -157,6 +168,12 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
                     "batch_too_large"));
         }
 
+        Optional<UUID> worker = this.workerSelector.select(preferredPlayer);
+        int protocolVersion = worker.flatMap(this.capabilities::get)
+                .map(ClientCapabilities::getProtocolVersion).orElse(ItemIconRenderProtocol.VERSION);
+        // The same item can have a different name after changing client language/resource packs.
+        // Refresh names for each publication; never cache another administrator's translation.
+        boolean refreshNames = protocolVersion == ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION;
         Map<String, RenderedIcon> fromCache = new HashMap<String, RenderedIcon>();
         List<RenderItemPayload> missing = new ArrayList<RenderItemPayload>();
         for (RenderItemPayload item : items) {
@@ -166,7 +183,8 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
             Optional<String> cached = this.cache.findIconHash(item.getRenderKey());
             if (cached.isPresent()) {
                 fromCache.put(item.getRenderKey(), new RenderedIcon(item.getRenderKey(), cached.get(), null));
-            } else {
+            }
+            if (!cached.isPresent() || refreshNames) {
                 missing.add(item);
             }
         }
@@ -175,7 +193,6 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
             return CompletableFuture.completedFuture(new BatchResult(fromCache, Collections.<String>emptySet(), null));
         }
 
-        Optional<UUID> worker = this.workerSelector.select(preferredPlayer);
         if (!worker.isPresent()) {
             return CompletableFuture.completedFuture(new BatchResult(fromCache, keySet(missing), "renderer_unavailable"));
         }
@@ -189,14 +206,14 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
         UUID requestId = UUID.randomUUID();
         ItemIconRenderRequest request = new ItemIconRenderRequest(
                 requestId,
-                ItemIconRenderProtocol.VERSION,
+                protocolVersion,
                 ItemIconRenderProtocol.ICON_SIZE,
                 missing
         );
 
         CompletableFuture<BatchResult> future = new CompletableFuture<BatchResult>();
         Set<String> expected = keySet(missing);
-        PendingRequest pendingRequest = new PendingRequest(playerId, expected, fromCache, future);
+        PendingRequest pendingRequest = new PendingRequest(playerId, protocolVersion, expected, fromCache, future);
         this.pending.put(requestId, pendingRequest);
         flight.incrementAndGet();
 
@@ -253,7 +270,7 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
         }
         decrementFlight(playerId);
 
-        if (response.getProtocolVersion() != ItemIconRenderProtocol.VERSION) {
+        if (response.getProtocolVersion() != pendingRequest.protocolVersion) {
             pendingRequest.future.complete(new BatchResult(
                     pendingRequest.partial, pendingRequest.expectedKeys, "protocol_mismatch"));
             return;
@@ -284,7 +301,9 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
                 PngIconValidator.assertClientHashMatches(png, icon.getClientSha256());
                 String hash = PngIconValidator.authoritativeSha256(png);
                 this.cache.put(icon.getRenderKey(), hash);
-                rendered.put(icon.getRenderKey(), new RenderedIcon(icon.getRenderKey(), hash, png));
+                String name = pendingRequest.protocolVersion == ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION
+                        ? icon.getDisplayName() : null;
+                rendered.put(icon.getRenderKey(), new RenderedIcon(icon.getRenderKey(), hash, png, name));
             } catch (RuntimeException e) {
                 failed.add(icon.getRenderKey());
                 this.logger.warn("[ItemIconRender] reject icon render_key=" + icon.getRenderKey()
@@ -341,14 +360,16 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
 
     private static final class PendingRequest {
         private final UUID playerId;
+        private final int protocolVersion;
         private final Set<String> expectedKeys;
         private final Map<String, RenderedIcon> partial;
         private final CompletableFuture<BatchResult> future;
 
-        private PendingRequest(UUID playerId, Set<String> expectedKeys,
+        private PendingRequest(UUID playerId, int protocolVersion, Set<String> expectedKeys,
                                Map<String, RenderedIcon> partial,
                                CompletableFuture<BatchResult> future) {
             this.playerId = playerId;
+            this.protocolVersion = protocolVersion;
             this.expectedKeys = expectedKeys;
             this.partial = new HashMap<String, RenderedIcon>(partial);
             this.future = future;

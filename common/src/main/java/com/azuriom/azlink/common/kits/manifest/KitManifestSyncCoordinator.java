@@ -146,6 +146,7 @@ public final class KitManifestSyncCoordinator {
 
         return allUploads.thenCompose(v -> {
             List<ManifestItem> manifestItems = new ArrayList<ManifestItem>();
+            int localizedNames = 0;
             for (int i = 0; i < ordered.size(); i++) {
                 ServerKitItem serverItem = ordered.get(i);
                 RenderKey key = RenderKey.fromItemStackBytes(
@@ -153,6 +154,11 @@ public final class KitManifestSyncCoordinator {
                 String hash = iconHashes.get(key.getValue());
                 ItemIconRef icon = hash == null ? ItemIconRef.none() : ItemIconRef.contentHash(hash);
                 ManifestItem item = this.metadataExtractor.extract(serverItem.getSnapshot(), icon);
+                ItemIconRenderCoordinator.RenderedIcon rendered = batch.getRendered().get(key.getValue());
+                if (rendered != null && rendered.getDisplayName() != null) {
+                    item = item.withDisplayName(rendered.getDisplayName());
+                    localizedNames++;
+                }
                 manifestItems.add(item);
             }
 
@@ -168,12 +174,14 @@ public final class KitManifestSyncCoordinator {
             }
 
             final String hash = request.getManifestHash();
+            final int localizedCount = localizedNames;
             return this.siteClient.uploadManifest(request).thenApply(result -> {
                 if (result.isSuccess() && result.getBody() != null) {
                     KitManifestUploadResponse body = result.getBody();
                     this.plugin.getLogger().info("[KitManifest] publish ok delivery_key=" + deliveryKey
                             + " outcome=" + body.getOutcome()
                             + " icons=" + iconHashes.size()
+                            + " localized_names=" + localizedCount
                             + (batch.getError() != null ? " render_note=" + batch.getError() : ""));
                     return KitManifestSyncResult.ok(result.getHttpStatus(), body, hash);
                 }

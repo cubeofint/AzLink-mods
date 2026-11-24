@@ -44,7 +44,7 @@ repositories {
 }
 
 dependencies {
-    shade project(':azlink-common')
+    shade "com.azuriom:azlink-common:${project.version}"
     // Instant commands HTTP pipeline needs HttpRequestDecoder / HttpResponseEncoder.
     shade("io.netty:netty-codec-http:${project.ext.netty_version}") {
         transitive = false

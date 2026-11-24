@@ -19,6 +19,5 @@ plugins {
 
 rootProject.name = 'azlink-forge-1.7.10'
 
-// Reuse shared Java 8 core without pulling ForgeGradle/NeoForge into this RFG build.
-include ':azlink-common'
-project(':azlink-common').projectDir = file('../common')
+// The same included build is reused by the modern root, so IDEA imports its sources only once.
+includeBuild('../common') { name = 'azlink-common' }
