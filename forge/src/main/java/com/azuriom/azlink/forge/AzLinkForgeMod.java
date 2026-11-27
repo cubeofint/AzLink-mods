@@ -9,6 +9,7 @@ import com.azuriom.azlink.common.logger.LoggerAdapter;
 import com.azuriom.azlink.common.logger.Slf4jLoggerAdapter;
 import com.azuriom.azlink.common.platform.PlatformInfo;
 import com.azuriom.azlink.common.platform.PlatformType;
+import com.azuriom.azlink.common.privileges.LuckPermsPrivilegeBackend;
 import com.azuriom.azlink.common.scheduler.JavaSchedulerAdapter;
 import com.azuriom.azlink.common.scheduler.SchedulerAdapter;
 import com.azuriom.azlink.common.tasks.TpsTask;
@@ -85,6 +86,9 @@ public final class AzLinkForgeMod implements AzLinkPlatform {
         this.plugin.installKitCatalog(new com.azuriom.azlink.forge.kits.ForgeKitCatalog());
         this.plugin.setItemIconRenderTransport(new com.azuriom.azlink.forge.network.ForgeItemIcons(this.plugin,
                 id -> this.server == null ? null : this.server.getPlayerList().getPlayer(id)));
+        if (this.server.isDedicatedServer() && ModList.get().isLoaded("luckperms")) {
+            this.plugin.installLuckPerms(LuckPermsPrivilegeBackend.forExistingGroups());
+        }
         this.plugin.init();
     }
 

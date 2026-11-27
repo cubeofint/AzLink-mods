@@ -1,4 +1,4 @@
-package com.azuriom.azlink.neoforge.luckperms;
+package com.azuriom.azlink.common.privileges;
 
 import com.azuriom.azlink.common.executor.ledger.EntitlementVersionLedger;
 import com.azuriom.azlink.common.executor.ledger.GrantedNodes;
@@ -6,8 +6,6 @@ import com.azuriom.azlink.common.executor.model.ExecutionResult;
 import com.azuriom.azlink.common.executor.model.OperationResultCode;
 import com.azuriom.azlink.common.executor.model.ShopOperation;
 import com.azuriom.azlink.common.logger.LoggerAdapter;
-import com.azuriom.azlink.common.privileges.PrivilegeBackend;
-import com.azuriom.azlink.common.privileges.PrivilegePlan;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.group.Group;
@@ -36,7 +34,20 @@ import java.util.concurrent.TimeUnit;
  */
 public final class LuckPermsPrivilegeBackend implements PrivilegeBackend {
 
+    private final boolean createMissingGroups;
     private EntitlementVersionLedger ledger;
+
+    public LuckPermsPrivilegeBackend() {
+        this(true);
+    }
+
+    private LuckPermsPrivilegeBackend(boolean createMissingGroups) {
+        this.createMissingGroups = createMissingGroups;
+    }
+
+    public static LuckPermsPrivilegeBackend forExistingGroups() {
+        return new LuckPermsPrivilegeBackend(false);
+    }
 
     @Override
     public void bindLedger(EntitlementVersionLedger ledger) {
@@ -113,8 +124,8 @@ public final class LuckPermsPrivilegeBackend implements PrivilegeBackend {
                 : this.ledger.getGrant(playerId, entitlementKey).orElse(null);
 
         try {
-            if (!plan.isClearOnly() && plan.getGroupName() != null) {
-                ensureGroup(api, plan.getGroupName());
+            if (!plan.isClearOnly() && plan.getGroupName() != null && !ensureGroup(api, plan.getGroupName())) {
+                return ExecutionResult.of(OperationResultCode.FAILED, "luckperms group not found: " + plan.getGroupName());
             }
             api.getUserManager().modifyUser(playerId, user -> mutate(user, plan, previous)).get(15, TimeUnit.SECONDS);
         } catch (CompletionException e) {
@@ -173,15 +184,19 @@ public final class LuckPermsPrivilegeBackend implements PrivilegeBackend {
         ));
     }
 
-    private static void ensureGroup(LuckPerms api, String groupName) throws Exception {
+    private boolean ensureGroup(LuckPerms api, String groupName) throws Exception {
         if (api.getGroupManager().getGroup(groupName) != null) {
-            return;
+            return true;
         }
         Optional<Group> loaded = api.getGroupManager().loadGroup(groupName).get(15, TimeUnit.SECONDS);
         if (loaded.isPresent()) {
-            return;
+            return true;
+        }
+        if (!this.createMissingGroups) {
+            return false;
         }
         api.getGroupManager().createAndLoadGroup(groupName).get(15, TimeUnit.SECONDS);
+        return true;
     }
 
     private static void mutate(User user, PrivilegePlan plan, GrantedNodes previous) {

@@ -86,7 +86,7 @@ public final class AzLinkNeoForgeMod implements AzLinkPlatform {
 
     private void installSemanticBackends() {
         if (net.neoforged.fml.ModList.get().isLoaded("luckperms")) {
-            this.plugin.installLuckPerms(new com.azuriom.azlink.neoforge.luckperms.LuckPermsPrivilegeBackend());
+            this.plugin.installLuckPerms(new com.azuriom.azlink.common.privileges.LuckPermsPrivilegeBackend());
         }
         if (net.neoforged.fml.ModList.get().isLoaded("ftbessentials")
                 && net.neoforged.fml.ModList.get().isLoaded("cointcore")
