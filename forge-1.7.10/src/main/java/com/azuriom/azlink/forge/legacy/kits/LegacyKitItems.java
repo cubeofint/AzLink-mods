@@ -1,5 +1,6 @@
 package com.azuriom.azlink.forge.legacy.kits;
 
+import com.azuriom.azlink.common.kits.manifest.KitManifestLimits;
 import com.azuriom.azlink.common.kits.manifest.ServerKitItem;
 import com.azuriom.azlink.common.kits.manifest.extract.ItemStackSnapshot;
 import com.azuriom.azlink.common.kits.manifest.model.EnchantmentRef;
@@ -12,8 +13,11 @@ import net.minecraft.nbt.*;
 import net.minecraft.enchantment.Enchantment;
 import java.io.*;
 import java.util.*;
+import java.util.regex.Pattern;
 
 public final class LegacyKitItems {
+    private static final Pattern UNSUPPORTED_KEY_CHARS = Pattern.compile("[^a-z0-9._-]+");
+
     private LegacyKitItems() {}
     public static List<ServerKitItem> snapshot(List<ItemStack> stacks) {
         List<ServerKitItem> result = new ArrayList<ServerKitItem>();
@@ -31,12 +35,21 @@ public final class LegacyKitItems {
                 enchants.add(new EnchantmentRef(enchantment == null ? "enchantment:" + index : enchantment.getName(), e.getShort("lvl")));
             }
             ItemStackSnapshot snapshot = ItemStackSnapshot.builder().slot(result.size()).registryId(registry)
-                    .semanticKey(id.name.substring(0, Math.min(64, id.name.length()))).displayName(stack.getDisplayName())
+                    .semanticKey(semanticKey(id.name)).displayName(stack.getDisplayName())
                     .quantity(stack.stackSize).modName(mod).rarity(stack.getRarity().name().toLowerCase(Locale.ROOT)).enchantments(enchants).build();
             result.add(new ServerKitItem(snapshot, encode(stack)));
         }
         return result;
     }
+
+    static String semanticKey(String registryName) {
+        String key = UNSUPPORTED_KEY_CHARS.matcher(registryName.toLowerCase(Locale.ROOT)).replaceAll("_");
+        if (key.isEmpty() || !Character.isLetterOrDigit(key.charAt(0))) {
+            key = "item_" + key;
+        }
+        return key.substring(0, Math.min(KitManifestLimits.MAX_SEMANTIC_KEY, key.length()));
+    }
+
     public static byte[] encode(ItemStack stack) {
         NBTTagCompound tag = new NBTTagCompound(); stack.writeToNBT(tag);
         GameRegistry.UniqueIdentifier id = GameRegistry.findUniqueIdentifierFor(stack.getItem());

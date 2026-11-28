@@ -11,6 +11,8 @@ public final class ForgeIconClient {
         MinecraftForge.EVENT_BUS.register(new ForgeIconClient());
     }
     @SubscribeEvent public void login(ClientPlayerNetworkEvent.LoggingIn event) {
-        if (event.getConnection() != null && ForgeItemIcons.present(event.getConnection())) ForgeItemIcons.advertise();
+        if (event.getConnection() != null && ForgeItemIcons.present(event.getConnection())) {
+            ForgeItemIcons.advertise(event.getConnection());
+        }
     }
 }

@@ -147,6 +147,7 @@ public final class KitManifestSyncCoordinator {
         return allUploads.thenCompose(v -> {
             List<ManifestItem> manifestItems = new ArrayList<ManifestItem>();
             int localizedNames = 0;
+            int tooltipCount = 0;
             for (int i = 0; i < ordered.size(); i++) {
                 ServerKitItem serverItem = ordered.get(i);
                 RenderKey key = RenderKey.fromItemStackBytes(
@@ -158,6 +159,10 @@ public final class KitManifestSyncCoordinator {
                 if (rendered != null && rendered.getDisplayName() != null) {
                     item = item.withDisplayName(rendered.getDisplayName());
                     localizedNames++;
+                }
+                if (rendered != null && !rendered.getTooltip().isEmpty()) {
+                    item = item.withTooltip(rendered.getTooltip());
+                    tooltipCount++;
                 }
                 manifestItems.add(item);
             }
@@ -175,6 +180,7 @@ public final class KitManifestSyncCoordinator {
 
             final String hash = request.getManifestHash();
             final int localizedCount = localizedNames;
+            final int exportedTooltipCount = tooltipCount;
             return this.siteClient.uploadManifest(request).thenApply(result -> {
                 if (result.isSuccess() && result.getBody() != null) {
                     KitManifestUploadResponse body = result.getBody();
@@ -182,6 +188,7 @@ public final class KitManifestSyncCoordinator {
                             + " outcome=" + body.getOutcome()
                             + " icons=" + iconHashes.size()
                             + " localized_names=" + localizedCount
+                            + " tooltips=" + exportedTooltipCount
                             + (batch.getError() != null ? " render_note=" + batch.getError() : ""));
                     return KitManifestSyncResult.ok(result.getHttpStatus(), body, hash);
                 }

@@ -84,6 +84,7 @@ public final class AzLinkForgeMod implements AzLinkPlatform {
         this.server = event.getServer();
         this.scheduler = this.initScheduler();
         this.plugin.installKitCatalog(new com.azuriom.azlink.forge.kits.ForgeKitCatalog());
+        this.plugin.installChunkLoaders(com.azuriom.azlink.common.chunks.ReflectiveChunkCredit.find("gto"));
         this.plugin.setItemIconRenderTransport(new com.azuriom.azlink.forge.network.ForgeItemIcons(this.plugin,
                 id -> this.server == null ? null : this.server.getPlayerList().getPlayer(id)));
         if (this.server.isDedicatedServer() && ModList.get().isLoaded("luckperms")) {

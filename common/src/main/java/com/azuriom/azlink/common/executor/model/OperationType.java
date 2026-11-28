@@ -9,7 +9,8 @@ public enum OperationType {
     KIT_REDEEM("kit_redeem"),
     GROUP_GRANT("group_grant"),
     GROUP_REVOKE("group_revoke"),
-    KIT_CREDIT("kit_credit");
+    KIT_CREDIT("kit_credit"),
+    CHUNK_LOADER_CREDIT("chunk_loader_credit");
 
     private final String wire;
 

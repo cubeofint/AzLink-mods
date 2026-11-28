@@ -71,6 +71,12 @@ public final class ManifestItem {
                 this.enchantments, this.metadata, this.icon);
     }
 
+    public ManifestItem withTooltip(List<String> tooltip) {
+        return new ManifestItem(this.slot, this.semanticKey, this.registryId, this.displayName,
+                this.quantity, this.modName, this.rarity, tooltip, this.attributes,
+                this.enchantments, this.metadata, this.icon);
+    }
+
     public String getDisplayName() {
         return this.displayName;
     }

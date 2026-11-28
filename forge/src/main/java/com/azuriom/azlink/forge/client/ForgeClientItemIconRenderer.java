@@ -17,7 +17,10 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.VertexSorting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
 
 import org.joml.Matrix4f;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -25,6 +28,8 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
 
 /**
  * Client-only rendering worker. Never talks to main-site / never holds Azuriom-Link-Token.
@@ -54,15 +59,52 @@ public final class ForgeClientItemIconRenderer {
                 }
                 byte[] png = renderItemToPng(stack, request.getIconSize());
                 String hash = IconContentAddressing.sha256Hex(png);
-                String name = request.getProtocolVersion() == ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION
+                String name = ItemIconRenderProtocol.hasLocalizedNames(request.getProtocolVersion())
                         ? stack.getHoverName().getString() : null;
-                results.add(IconRenderResult.rendered(item.getRenderKey(), png, hash, name));
+                List<String> tooltip = ItemIconRenderProtocol.hasTooltips(request.getProtocolVersion())
+                        ? captureTooltip(stack) : List.of();
+                results.add(IconRenderResult.rendered(item.getRenderKey(), png, hash, name, tooltip));
             } catch (Exception e) {
                 results.add(IconRenderResult.failed(item.getRenderKey(),
                         e.getMessage() == null ? "render_failed" : truncate(e.getMessage(), 60)));
             }
         }
         send(request, results);
+    }
+
+    private static List<String> captureTooltip(ItemStack stack) {
+        try {
+            return stack.getTooltipLines(Minecraft.getInstance().player, TooltipFlag.Default.NORMAL).stream()
+                    .map(ForgeClientItemIconRenderer::tooltipLine)
+                    .toList();
+        } catch (RuntimeException ignored) {
+            // A mod's tooltip hook may fail. The item name and icon can still be exported.
+            return List.of();
+        }
+    }
+
+    private static String tooltipLine(Component component) {
+        StringBuilder line = new StringBuilder();
+        component.visit((style, text) -> {
+            if (text.isEmpty()) {
+                return Optional.empty();
+            }
+            line.append("§r");
+            if (style.getColor() != null) {
+                line.append("§x");
+                String hex = String.format(Locale.ROOT, "%06x", style.getColor().getValue());
+                for (int i = 0; i < hex.length(); i++) {
+                    line.append('§').append(hex.charAt(i));
+                }
+            }
+            if (style.isBold()) line.append("§l");
+            if (style.isItalic()) line.append("§o");
+            if (style.isUnderlined()) line.append("§n");
+            if (style.isStrikethrough()) line.append("§m");
+            line.append(text);
+            return Optional.empty();
+        }, Style.EMPTY);
+        return line.toString();
     }
 
     private void send(ItemIconRenderRequest request, List<IconRenderResult> results) {

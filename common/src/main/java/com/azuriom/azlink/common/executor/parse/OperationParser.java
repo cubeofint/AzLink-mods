@@ -89,6 +89,13 @@ public class OperationParser {
                 return validateGroupRevoke(operation);
             case KIT_CREDIT:
                 return validateKitCredit(operation);
+            case CHUNK_LOADER_CREDIT:
+                try {
+                    com.azuriom.azlink.common.chunks.ChunkLoaderPurchase.parse(operation);
+                    return ExecutionResult.of(OperationResultCode.SUCCEEDED);
+                } catch (IllegalArgumentException invalid) {
+                    return ExecutionResult.of(OperationResultCode.FAILED, invalid.getMessage());
+                }
             default:
                 return ExecutionResult.of(OperationResultCode.FAILED, "unhandled type " + type);
         }

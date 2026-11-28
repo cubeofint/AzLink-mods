@@ -306,6 +306,11 @@ public class AzLinkPlugin {
         installKitRedeemHandler(this.platformKitPublisher.creditHandler(true));
     }
 
+    public void installChunkLoaders(com.azuriom.azlink.common.chunks.ChunkLoaderBackend backend) {
+        if (backend != null) this.semanticExecutorService.useChunkLoaderHandler(
+                com.azuriom.azlink.common.chunks.PlatformChunkLoaders.handler(this, backend));
+    }
+
     public com.azuriom.azlink.common.kits.PlatformKitPublisher getPlatformKitPublisher() {
         return this.platformKitPublisher;
     }

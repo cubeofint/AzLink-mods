@@ -8,9 +8,19 @@ public final class ItemIconRenderProtocol {
     public static final int VERSION = 1;
     /** Negotiated only with clients that can return localized item names. */
     public static final int LOCALIZED_NAMES_VERSION = 2;
+    public static final int TOOLTIPS_VERSION = 3;
+    public static final int MAX_TOOLTIP_WIRE_BYTES = 8 * 1024;
 
     public static boolean isSupported(int version) {
-        return version == VERSION || version == LOCALIZED_NAMES_VERSION;
+        return version == VERSION || hasLocalizedNames(version);
+    }
+
+    public static boolean hasLocalizedNames(int version) {
+        return version == LOCALIZED_NAMES_VERSION || hasTooltips(version);
+    }
+
+    public static boolean hasTooltips(int version) {
+        return version == TOOLTIPS_VERSION;
     }
     public static final int ICON_SIZE = 64;
     public static final String IMAGE_FORMAT = "png";

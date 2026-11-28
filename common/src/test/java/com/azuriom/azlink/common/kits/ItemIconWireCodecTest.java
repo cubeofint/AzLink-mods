@@ -16,6 +16,24 @@ class ItemIconWireCodecTest {
         ItemIconRenderResponse response = new ItemIconRenderResponse(UUID.randomUUID(), ItemIconRenderProtocol.VERSION,"test",
             Collections.singletonList(IconRenderResult.rendered("1234567890abcdef",bytes.toByteArray(),"1234567890abcdef")));
         assertTrue(ItemIconWireCodec.response(response).length + 64 < 32767, "Leave room for the channel/message wrapper");
+        List<String> tooltip = Collections.nCopies(32, String.join("", Collections.nCopies(500, "Ж")));
+        ItemIconRenderResponse withTooltip = new ItemIconRenderResponse(UUID.randomUUID(),
+                ItemIconRenderProtocol.TOOLTIPS_VERSION, "test",
+                Collections.singletonList(IconRenderResult.rendered("key", bytes.toByteArray(), "hash", "Броня", tooltip)));
+        assertTrue(ItemIconWireCodec.response(withTooltip).length + 64 < 32767);
+    }
+
+    @Test void tooltipsAreOptionalForOlderRenderersAndRetainFormattingInVersionThree() {
+        List<String> tooltip = Arrays.asList("§x§e§3§b§a§4§5Редкая броня", "§b+8 брони", "Гнездо самоцвета");
+        IconRenderResult result = IconRenderResult.rendered("key", new byte[]{1, 2}, "hash", "Броня", tooltip);
+        for (int version : new int[]{ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION, ItemIconRenderProtocol.TOOLTIPS_VERSION}) {
+            ItemIconRenderResponse response = new ItemIconRenderResponse(UUID.randomUUID(), version, "test",
+                    Collections.singletonList(result));
+            IconRenderResult decoded = ItemIconWireCodec.response(ItemIconWireCodec.response(response)).getIcons().get(0);
+            assertEquals("Броня", decoded.getDisplayName());
+            assertEquals(version == ItemIconRenderProtocol.TOOLTIPS_VERSION ? tooltip : Collections.emptyList(),
+                    decoded.getTooltip());
+        }
     }
     @Test void roundTripsBinaryNbtAndAuthenticatedRequestIdentity() {
         UUID id=UUID.randomUUID(); byte[] nbt={0,1,-1,34,0};

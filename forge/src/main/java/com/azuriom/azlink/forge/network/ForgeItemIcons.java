@@ -2,6 +2,8 @@ package com.azuriom.azlink.forge.network;
 
 import com.azuriom.azlink.common.AzLinkPlugin;
 import com.azuriom.azlink.common.kits.manifest.render.*;
+import com.azuriom.azlink.common.utils.VersionInfo;
+import net.minecraft.network.Connection;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
@@ -14,8 +16,10 @@ import java.util.*;
 import java.util.function.*;
 
 public final class ForgeItemIcons implements ItemIconRenderTransport {
-    private static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(new ResourceLocation("azlink", "item_icons"),
-            () -> "1", version -> true, version -> true);
+    private static final ResourceLocation CHANNEL_ID = new ResourceLocation("azlink", "item_icons");
+    private static final String TOOLTIPS_CHANNEL_VERSION = "2";
+    private static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(CHANNEL_ID,
+            () -> TOOLTIPS_CHANNEL_VERSION, version -> true, version -> true);
     private static Consumer<ItemIconRenderRequest> client = request -> {};
     private final AzLinkPlugin plugin;
     private final Function<UUID, ServerPlayer> lookup;
@@ -38,8 +42,17 @@ public final class ForgeItemIcons implements ItemIconRenderTransport {
         if (sender != null) context.enqueueWork(() -> work.accept(sender)); context.setPacketHandled(true);
     }
     public static void clientHandler(Consumer<ItemIconRenderRequest> handler) { client = handler; }
-    public static boolean present(net.minecraft.network.Connection connection) { return CHANNEL.isRemotePresent(connection); }
-    public static void advertise() { CHANNEL.sendToServer(new Capabilities(ItemIconWireCodec.capabilities(ClientCapabilities.withLocalizedNames(com.azuriom.azlink.common.utils.VersionInfo.VERSION)))); }
+    public static boolean present(Connection connection) { return CHANNEL.isRemotePresent(connection); }
+
+    public static void advertise(Connection connection) {
+        ConnectionData data = NetworkHooks.getConnectionData(connection);
+        boolean supportsTooltips = data != null && TOOLTIPS_CHANNEL_VERSION.equals(data.getChannels().get(CHANNEL_ID));
+        ClientCapabilities capabilities = supportsTooltips
+                ? new ClientCapabilities(ItemIconRenderProtocol.TOOLTIPS_VERSION, true, VersionInfo.VERSION,
+                        ItemIconRenderProtocol.ICON_SIZE, ItemIconRenderProtocol.IMAGE_FORMAT)
+                : ClientCapabilities.withLocalizedNames(VersionInfo.VERSION);
+        CHANNEL.sendToServer(new Capabilities(ItemIconWireCodec.capabilities(capabilities)));
+    }
     public static void respond(ItemIconRenderResponse response) { CHANNEL.sendToServer(new Response(ItemIconWireCodec.response(response))); }
     // ServerboundCustomPayloadPacket in 1.20.1 is limited to 32767 bytes, including the response.
     public int maxBatchItems() { return 1; }

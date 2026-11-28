@@ -41,6 +41,12 @@ public class SemanticExecutorService {
 
     private OperationHandler kitRedeemHandler;
     private OperationHandler kitCreditHandler;
+    private OperationHandler chunkLoaderHandler;
+
+    public void useChunkLoaderHandler(OperationHandler handler) {
+        this.chunkLoaderHandler = handler;
+        if (this.executor != null) this.executor.useChunkLoaderHandler(handler);
+    }
 
     /**
      * Install LuckPerms before {@link #start()}. Empty capability lists then accept every site capability.
@@ -72,6 +78,7 @@ public class SemanticExecutorService {
             this.config = loadOrCreateConfig();
             if (this.plugin.getPlatformKitPublisher() != null && this.privilegeBackend == null)
                 this.config.limitToKitOperations();
+            this.config.setChunkLoaderSupport(this.chunkLoaderHandler != null);
             CapabilityKeys.Resolution capabilities = CapabilityKeys.resolve(
                     this.config.getSupportedCapabilities(), this.luckPermsAcceptAllCapabilities);
             this.config.setSupportedCapabilities(capabilities.getAdvertised());
@@ -82,6 +89,7 @@ public class SemanticExecutorService {
                     this.plugin.getLogger(), this.privilegeBackend);
             this.executor.useKitRedeemHandler(this.kitRedeemHandler);
             this.executor.useKitCreditHandler(this.kitCreditHandler);
+            this.executor.useChunkLoaderHandler(this.chunkLoaderHandler);
             OperationsApiClient client = new HttpOperationsClient(this.plugin, this.config);
             this.pollTask = new SemanticPollTask(this.plugin, this.executor, client);
 
@@ -101,6 +109,7 @@ public class SemanticExecutorService {
                     + " protocol=" + this.config.getProtocolVersion()
                     + " poll=" + intervalSec + "s"
                     + " max_batch=" + this.config.getMaxBatch()
+                    + " chunk_loaders=" + (this.chunkLoaderHandler != null)
                     + (this.plugin.isConfigured() ? "" : " (waiting for site link)"));
         } catch (IOException e) {
             this.plugin.getLogger().error("[SemanticExecutor] failed to start", e);

@@ -30,13 +30,19 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
         private final String iconHash;
         private final byte[] pngBytes;
         private final String displayName;
+        private final List<String> tooltip;
 
         public RenderedIcon(String renderKey, String iconHash, byte[] pngBytes) {
             this(renderKey, iconHash, pngBytes, null);
         }
 
         public RenderedIcon(String renderKey, String iconHash, byte[] pngBytes, String displayName) {
+            this(renderKey, iconHash, pngBytes, displayName, Collections.<String>emptyList());
+        }
+
+        public RenderedIcon(String renderKey, String iconHash, byte[] pngBytes, String displayName, List<String> tooltip) {
             this.displayName = displayName;
+            this.tooltip = tooltip;
             this.renderKey = renderKey;
             this.iconHash = iconHash;
             this.pngBytes = pngBytes;
@@ -48,6 +54,10 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
 
         public String getDisplayName() {
             return this.displayName;
+        }
+
+        public List<String> getTooltip() {
+            return this.tooltip;
         }
 
         public String getIconHash() {
@@ -171,9 +181,8 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
         Optional<UUID> worker = this.workerSelector.select(preferredPlayer);
         int protocolVersion = worker.flatMap(this.capabilities::get)
                 .map(ClientCapabilities::getProtocolVersion).orElse(ItemIconRenderProtocol.VERSION);
-        // The same item can have a different name after changing client language/resource packs.
-        // Refresh names for each publication; never cache another administrator's translation.
-        boolean refreshNames = protocolVersion == ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION;
+        // Names and tooltips depend on the rendering client's language and resource packs.
+        boolean refreshPresentation = ItemIconRenderProtocol.hasLocalizedNames(protocolVersion);
         Map<String, RenderedIcon> fromCache = new HashMap<String, RenderedIcon>();
         List<RenderItemPayload> missing = new ArrayList<RenderItemPayload>();
         for (RenderItemPayload item : items) {
@@ -184,7 +193,7 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
             if (cached.isPresent()) {
                 fromCache.put(item.getRenderKey(), new RenderedIcon(item.getRenderKey(), cached.get(), null));
             }
-            if (!cached.isPresent() || refreshNames) {
+            if (!cached.isPresent() || refreshPresentation) {
                 missing.add(item);
             }
         }
@@ -301,9 +310,11 @@ public final class ItemIconRenderCoordinator implements ItemIconRenderTransport.
                 PngIconValidator.assertClientHashMatches(png, icon.getClientSha256());
                 String hash = PngIconValidator.authoritativeSha256(png);
                 this.cache.put(icon.getRenderKey(), hash);
-                String name = pendingRequest.protocolVersion == ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION
+                String name = ItemIconRenderProtocol.hasLocalizedNames(pendingRequest.protocolVersion)
                         ? icon.getDisplayName() : null;
-                rendered.put(icon.getRenderKey(), new RenderedIcon(icon.getRenderKey(), hash, png, name));
+                List<String> tooltip = ItemIconRenderProtocol.hasTooltips(pendingRequest.protocolVersion)
+                        ? icon.getTooltip() : Collections.<String>emptyList();
+                rendered.put(icon.getRenderKey(), new RenderedIcon(icon.getRenderKey(), hash, png, name, tooltip));
             } catch (RuntimeException e) {
                 failed.add(icon.getRenderKey());
                 this.logger.warn("[ItemIconRender] reject icon render_key=" + icon.getRenderKey()

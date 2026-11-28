@@ -6,7 +6,7 @@ plugins {
 // Shared by modern Forge, NeoForge and the isolated Forge 1.7.10 build.
 // A single included build gives IDEA one owner for these sources and generated classes.
 group = 'com.azuriom'
-version = '1.3.11'
+version = '1.3.12'
 
 java {
     sourceCompatibility = JavaVersion.VERSION_1_8

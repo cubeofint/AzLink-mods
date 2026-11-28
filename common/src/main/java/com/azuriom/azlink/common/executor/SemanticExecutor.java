@@ -89,6 +89,10 @@ public class SemanticExecutor {
         }
     }
 
+    public void useChunkLoaderHandler(OperationHandler handler) {
+        if (handler != null) this.handlers.put(OperationType.CHUNK_LOADER_CREDIT, handler);
+    }
+
     public ExecutorConfig getConfig() {
         return this.config;
     }

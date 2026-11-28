@@ -64,6 +64,7 @@ public final class AzLinkForgeLegacyMod implements AzLinkPlatform {
     public void onServerStarting(FMLServerStartingEvent event) {
         this.server = event.getServer();
         this.plugin.installKitCatalog(new com.azuriom.azlink.forge.legacy.kits.LegacyKitCatalog());
+        this.plugin.installChunkLoaders(com.azuriom.azlink.common.chunks.ReflectiveChunkCredit.find("gtnh"));
         this.plugin.setItemIconRenderTransport(new com.azuriom.azlink.forge.legacy.network.LegacyItemIcons(this.plugin));
         event.registerServerCommand(new AzLinkLegacyCommand(this.plugin));
         this.plugin.init();

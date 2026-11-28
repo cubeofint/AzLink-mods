@@ -1,8 +1,11 @@
 package com.azuriom.azlink.common.kits.manifest.render;
 
+import com.azuriom.azlink.common.kits.manifest.KitManifestLimits;
+
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
@@ -47,8 +50,15 @@ public final class ItemIconWireCodec {
                 text(out,icon.getRenderKey(),128); out.writeByte(icon.getStatus().ordinal());
                 if(icon.getStatus()==IconRenderResult.Status.RENDERED) {
                     blob(out,icon.getPngBytes(),ItemIconRenderProtocol.MAX_PNG_BYTES); text(out,icon.getClientSha256(),64);
-                    if(value.getProtocolVersion()==ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION)
-                        text(out,icon.getDisplayName(),com.azuriom.azlink.common.kits.manifest.KitManifestLimits.MAX_DISPLAY_NAME);
+                    if (ItemIconRenderProtocol.hasLocalizedNames(value.getProtocolVersion())) {
+                        text(out, icon.getDisplayName(), KitManifestLimits.MAX_DISPLAY_NAME);
+                    }
+                    if (ItemIconRenderProtocol.hasTooltips(value.getProtocolVersion())) {
+                        out.writeInt(icon.getTooltip().size());
+                        for (String line : icon.getTooltip()) {
+                            text(out, line, KitManifestLimits.MAX_TOOLTIP_LINE_LENGTH);
+                        }
+                    }
                 } else text(out,icon.getErrorCode(),160);
             }
         });
@@ -61,9 +71,11 @@ public final class ItemIconWireCodec {
                 String key=text(in,128); int status=in.readUnsignedByte();
                 if(status==IconRenderResult.Status.RENDERED.ordinal()) {
                     byte[] png=blob(in,ItemIconRenderProtocol.MAX_PNG_BYTES); String hash=text(in,64);
-                    String name=version==ItemIconRenderProtocol.LOCALIZED_NAMES_VERSION
-                            ? text(in,com.azuriom.azlink.common.kits.manifest.KitManifestLimits.MAX_DISPLAY_NAME) : null;
-                    icons.add(IconRenderResult.rendered(key,png,hash,name));
+                    String name = ItemIconRenderProtocol.hasLocalizedNames(version)
+                            ? text(in, KitManifestLimits.MAX_DISPLAY_NAME) : null;
+                    List<String> tooltip = ItemIconRenderProtocol.hasTooltips(version)
+                            ? tooltip(in) : Collections.<String>emptyList();
+                    icons.add(IconRenderResult.rendered(key, png, hash, name, tooltip));
                 }
                 else if(status==IconRenderResult.Status.FAILED.ordinal()) icons.add(IconRenderResult.failed(key,text(in,160)));
                 else if(status==IconRenderResult.Status.UNSUPPORTED.ordinal()) icons.add(IconRenderResult.unsupported(key,text(in,160)));
@@ -72,6 +84,22 @@ public final class ItemIconWireCodec {
             return new ItemIconRenderResponse(id,version,renderer,icons);
         });
     }
+    private static List<String> tooltip(DataInputStream in) throws IOException {
+        int before = in.available();
+        int lines = in.readInt();
+        if (lines < 0 || lines > KitManifestLimits.MAX_TOOLTIP_LINES) {
+            throw new IOException("invalid tooltip line count");
+        }
+        List<String> tooltip = new ArrayList<String>(lines);
+        for (int i = 0; i < lines; i++) {
+            tooltip.add(text(in, KitManifestLimits.MAX_TOOLTIP_LINE_LENGTH));
+            if (before - in.available() > ItemIconRenderProtocol.MAX_TOOLTIP_WIRE_BYTES) {
+                throw new IOException("tooltip payload too large");
+            }
+        }
+        return tooltip;
+    }
+
     private static void count(int n) throws IOException { if(n<0 || n>ItemIconRenderProtocol.MAX_ITEMS_PER_REQUEST) throw new IOException("invalid item count"); }
     private static void uuid(DataOutputStream out,UUID id) throws IOException {out.writeLong(id.getMostSignificantBits());out.writeLong(id.getLeastSignificantBits());}
     private static UUID uuid(DataInputStream in) throws IOException {return new UUID(in.readLong(),in.readLong());}

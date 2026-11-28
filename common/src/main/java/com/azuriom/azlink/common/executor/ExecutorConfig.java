@@ -101,6 +101,14 @@ public class ExecutorConfig {
         this.supportedOperationTypes = supported;
     }
 
+    /** Advertise only a real installed backend, including when upgrading an existing config. */
+    public void setChunkLoaderSupport(boolean supported) {
+        List<String> types = new ArrayList<String>(getSupportedOperationTypes());
+        types.removeAll(Collections.singleton("chunk_loader_credit"));
+        if (supported) types.add("chunk_loader_credit");
+        this.supportedOperationTypes = types;
+    }
+
     public List<String> getSupportedCapabilities() {
         return this.supportedCapabilities == null
                 ? Collections.<String>emptyList()

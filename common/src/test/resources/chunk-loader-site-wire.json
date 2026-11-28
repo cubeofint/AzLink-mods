@@ -1,0 +1,18 @@
+{
+    "operation_id": "0a40c1ab-f42e-42ba-8cbd-b4e03856d5e0",
+    "claim_token": "14a43859-1011-492a-8f88-04f90d2b9378",
+    "type": "chunk_loader_credit",
+    "payload_hash": "a36183fe365224c1bf92535dbb02105c5ef2d682dc506712392e54cc76538279",
+    "payload": {
+        "expires_at": "2026-12-28T00:05:00+00:00",
+        "player_name": "FixturePlayer",
+        "player_uuid": "5b399b04-4058-41c7-8ba5-9134282b3f0b",
+        "quantity": 251,
+        "receipt": "0a40c1ab-f42e-42ba-8cbd-b4e03856d5e0",
+        "schema_version": 1,
+        "semantic_key": "chunk-loaders.0a40c1ab-f42e-42ba-8cbd-b4e03856d5e0",
+        "type": "chunk_loader_credit"
+    },
+    "attempt_no": 1,
+    "lease_expires_at": "2026-11-28T00:06:00.000000Z"
+}

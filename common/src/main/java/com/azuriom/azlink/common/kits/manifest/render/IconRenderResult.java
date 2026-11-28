@@ -1,6 +1,12 @@
 package com.azuriom.azlink.common.kits.manifest.render;
 
+import com.azuriom.azlink.common.kits.manifest.KitManifestLimits;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 public final class IconRenderResult {
@@ -17,6 +23,7 @@ public final class IconRenderResult {
     private final String clientSha256;
     private final String errorCode;
     private final String displayName;
+    private final List<String> tooltip;
 
     private IconRenderResult(String renderKey, Status status, byte[] pngBytes,
                              String clientSha256, String errorCode) {
@@ -25,7 +32,13 @@ public final class IconRenderResult {
 
     private IconRenderResult(String renderKey, Status status, byte[] pngBytes,
                              String clientSha256, String errorCode, String displayName) {
+        this(renderKey, status, pngBytes, clientSha256, errorCode, displayName, Collections.<String>emptyList());
+    }
+
+    private IconRenderResult(String renderKey, Status status, byte[] pngBytes,
+                             String clientSha256, String errorCode, String displayName, List<String> tooltip) {
         this.displayName = normalizeDisplayName(displayName);
+        this.tooltip = normalizeTooltip(tooltip);
         this.renderKey = Objects.requireNonNull(renderKey, "renderKey");
         this.status = Objects.requireNonNull(status, "status");
         this.pngBytes = pngBytes == null ? null : Arrays.copyOf(pngBytes, pngBytes.length);
@@ -42,16 +55,47 @@ public final class IconRenderResult {
         return new IconRenderResult(renderKey, Status.RENDERED, pngBytes, clientSha256, null, displayName);
     }
 
+    public static IconRenderResult rendered(String renderKey, byte[] pngBytes, String clientSha256,
+                                             String displayName, List<String> tooltip) {
+        return new IconRenderResult(renderKey, Status.RENDERED, pngBytes, clientSha256, null, displayName, tooltip);
+    }
+
     /** Cosmetic text only: item identity, count and NBT always come from the server. */
     public String getDisplayName() {
         return this.displayName;
+    }
+
+    public List<String> getTooltip() {
+        return this.tooltip;
+    }
+
+    private static List<String> normalizeTooltip(List<String> lines) {
+        if (lines.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<String> tooltip = new ArrayList<String>();
+        int bytes = Integer.BYTES;
+        for (String line : lines) {
+            String cleaned = line.replaceAll("[\\p{Cntrl}\\p{Cf}]", "");
+            int end = Math.min(cleaned.length(), KitManifestLimits.MAX_TOOLTIP_LINE_LENGTH);
+            if (end > 0 && Character.isHighSurrogate(cleaned.charAt(end - 1))) {
+                end--;
+            }
+            String bounded = cleaned.substring(0, end);
+            bytes += Integer.BYTES + bounded.getBytes(StandardCharsets.UTF_8).length;
+            if (tooltip.size() == KitManifestLimits.MAX_TOOLTIP_LINES || bytes > ItemIconRenderProtocol.MAX_TOOLTIP_WIRE_BYTES) {
+                break;
+            }
+            tooltip.add(bounded);
+        }
+        return Collections.unmodifiableList(tooltip);
     }
 
     private static String normalizeDisplayName(String value) {
         if (value == null) return null;
         String name = value.replaceAll("\u00a7[0-9A-FK-ORa-fk-or]", "")
                 .replaceAll("[\\p{Cntrl}\\p{Cf}]", "").trim();
-        int end = Math.min(name.length(), com.azuriom.azlink.common.kits.manifest.KitManifestLimits.MAX_DISPLAY_NAME);
+        int end = Math.min(name.length(), KitManifestLimits.MAX_DISPLAY_NAME);
         if (end > 0 && Character.isHighSurrogate(name.charAt(end - 1))) end--;
         return end == 0 ? null : name.substring(0, end);
     }
